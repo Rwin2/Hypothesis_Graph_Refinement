@@ -4,11 +4,11 @@
   <p align="center">
     <a href="#">Peixin Chen</a><sup>1,2*</sup>,
     <a href="#">Guoxi Zhang</a><sup>2*</sup>,
-    <a href="#">Jianwei Ma</a><sup>1&dagger;</sup>,
+    <a href="#">Jianwei Ma</a><sup>1,3&dagger;</sup>,
     <a href="#">Qing Li</a><sup>2&dagger;</sup>
   </p>
   <p align="center">
-    <sup>1</sup>Harbin Institute of Technology &nbsp;&nbsp; <sup>2</sup>Beijing Institute for General Artificial Intelligence (BIGAI)<br/>
+    <sup>1</sup>Harbin Institute of Technology &nbsp;&nbsp; <sup>2</sup>Beijing Institute for General Artificial Intelligence (BIGAI) &nbsp;&nbsp; <sup>3</sup>Peking University<br/>
     <sup>*</sup>Equal Contribution &nbsp;&nbsp; <sup>&dagger;</sup>Corresponding Author
   </p>
   <p align="center">
@@ -17,9 +17,6 @@
     </a>
     <a href="ARXIV_URL">
       <img src='https://img.shields.io/badge/Paper-PDF-red?style=flat&logo=arXiv&logoColor=red' alt='Paper PDF'>
-    </a>
-    <a href="PAPER_URL">
-      <img src='https://img.shields.io/badge/Download-Paper-green?style=flat&logo=adobeacrobatreader&logoColor=green' alt='Download Paper'>
     </a>
   </p>
 </p>
