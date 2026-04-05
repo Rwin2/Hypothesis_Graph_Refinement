@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <meta name="title" content="Hypothesis Graph Refinement - Peixin Chen, Guoxi Zhang, Jianwei Ma, Qing Li">
+  <meta name="description" content="HGR represents frontier predictions as revisable hypothesis nodes in a dependency-aware graph memory, enabling hypothesis-driven exploration with cascade error correction for embodied navigation.">
+  <meta name="keywords" content="Embodied Navigation, Long-Horizon Exploration, Hypothesis Graph Refinement, Cascade Correction, Vision-Language Models, GOAT-Bench">
+  <meta name="author" content="Peixin Chen, Guoxi Zhang, Jianwei Ma, Qing Li">
+  <meta name="robots" content="index, follow">
+
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="HGR Project Page">
+  <meta property="og:title" content="Hypothesis Graph Refinement: Hypothesis-Driven Exploration with Cascade Error Correction for Embodied Navigation">
+  <meta property="og:description" content="HGR achieves 72.41% success rate and 56.22% SPL on GOAT-Bench through hypothesis-driven exploration and verification-driven cascade correction.">
+
+  <meta name="citation_title" content="Hypothesis Graph Refinement: Hypothesis-Driven Exploration with Cascade Error Correction for Embodied Navigation">
+  <meta name="citation_author" content="Chen, Peixin">
+  <meta name="citation_author" content="Zhang, Guoxi">
+  <meta name="citation_author" content="Ma, Jianwei">
+  <meta name="citation_author" content="Li, Qing">
+  <meta name="citation_publication_date" content="2026">
+
+  <title>HGR - Hypothesis Graph Refinement</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+  <link rel="stylesheet" href="static/css/bulma.min.css">
+  <link rel="stylesheet" href="static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="static/css/bulma-slider.min.css">
+  <link rel="stylesheet" href="static/css/fontawesome.all.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="static/css/index.css">
+
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <script defer src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script defer src="static/js/fontawesome.all.min.js"></script>
+  <script defer src="static/js/bulma-carousel.min.js"></script>
+  <script defer src="static/js/bulma-slider.min.js"></script>
+  <script defer src="static/js/index.js"></script>
+
+  <style>
+    /* Additional custom styles for HGR page */
+    .table-container {
+      overflow-x: auto;
+      margin: 1.5rem 0;
+    }
+    .results-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.95rem;
+      background: white;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .results-table thead {
+      background: #f1f5f9;
+    }
+    .results-table th, .results-table td {
+      padding: 0.75rem 1rem;
+      text-align: center;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .results-table th {
+      font-weight: 700;
+      color: #1e293b;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .results-table td {
+      color: #475569;
+    }
+    .results-table .method-name {
+      text-align: left;
+      font-weight: 600;
+      color: #1e293b;
+    }
+    .results-table tr.ours {
+      background: linear-gradient(135deg, #eff6ff, #dbeafe);
+      font-weight: 700;
+    }
+    .results-table tr.ours td {
+      color: #1e40af;
+    }
+    .results-table .separator td {
+      border-bottom: 2px solid #cbd5e1;
+      padding: 0;
+      height: 2px;
+    }
+    .results-table .group-header td {
+      text-align: left;
+      font-style: italic;
+      color: #64748b;
+      font-size: 0.85rem;
+      padding: 0.5rem 1rem;
+      background: #f8fafc;
+    }
+
+    .key-results {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1.5rem;
+      justify-content: center;
+      margin: 2rem 0;
+    }
+    .key-result-card {
+      background: white;
+      border-radius: 12px;
+      padding: 1.5rem 2rem;
+      text-align: center;
+      box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+      border: 1px solid #e2e8f0;
+      flex: 1;
+      min-width: 200px;
+      max-width: 280px;
+      transition: all 0.3s ease;
+    }
+    .key-result-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);
+    }
+    .key-result-number {
+      font-size: 2.5rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      line-height: 1.1;
+    }
+    .key-result-label {
+      font-size: 0.9rem;
+      color: #64748b;
+      margin-top: 0.5rem;
+      font-weight: 500;
+    }
+    .key-result-sublabel {
+      font-size: 0.75rem;
+      color: #94a3b8;
+      margin-top: 0.25rem;
+    }
+
+    .figure-container {
+      margin: 2rem 0;
+      text-align: center;
+    }
+    .figure-container img {
+      max-width: 100%;
+      border-radius: 12px;
+      box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+    }
+    .figure-caption {
+      margin-top: 1rem;
+      font-size: 0.9rem;
+      color: #64748b;
+      text-align: left;
+      line-height: 1.6;
+    }
+    .figure-caption strong {
+      color: #1e293b;
+    }
+
+    .section-divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, #e2e8f0, transparent);
+      margin: 0;
+    }
+
+    .method-overview {
+      background: linear-gradient(135deg, #f8fafc, #f1f5f9);
+      border-radius: 16px;
+      padding: 2rem;
+      margin: 2rem 0;
+      border: 1px solid #e2e8f0;
+    }
+
+    .method-step {
+      display: flex;
+      align-items: flex-start;
+      margin-bottom: 1.5rem;
+      gap: 1rem;
+    }
+    .method-step:last-child {
+      margin-bottom: 0;
+    }
+    .step-number {
+      flex-shrink: 0;
+      width: 36px;
+      height: 36px;
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      color: white;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 0.9rem;
+    }
+    .step-content h4 {
+      font-weight: 700;
+      color: #1e293b;
+      margin-bottom: 0.25rem;
+    }
+    .step-content p {
+      color: #64748b;
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+
+    .diagnostic-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1rem;
+      margin: 1.5rem 0;
+    }
+    .diagnostic-item {
+      background: white;
+      border-radius: 10px;
+      padding: 1.25rem;
+      border: 1px solid #e2e8f0;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    .diagnostic-item h4 {
+      font-weight: 700;
+      color: #1e293b;
+      font-size: 0.9rem;
+      margin-bottom: 0.5rem;
+    }
+    .diagnostic-item p {
+      color: #64748b;
+      font-size: 0.85rem;
+      line-height: 1.5;
+    }
+    .diagnostic-item .stat {
+      font-size: 1.5rem;
+      font-weight: 800;
+      color: #2563eb;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Scroll to Top Button -->
+  <button class="scroll-to-top" onclick="scrollToTop()" title="Scroll to top" aria-label="Scroll to top">
+    <i class="fas fa-chevron-up"></i>
+  </button>
+
+  <main id="main-content">
+
+  <!-- Hero Section -->
+  <section class="hero">
+    <div class="hero-body">
+      <div class="container is-max-desktop">
+        <div class="columns is-centered">
+          <div class="column has-text-centered">
+            <h1 class="title is-1 publication-title">Hypothesis Graph Refinement: Hypothesis-Driven Exploration with Cascade Error Correction for Embodied Navigation</h1>
+            <div class="is-size-5 publication-authors">
+              <span class="author-block">Peixin Chen<sup>1,2,*</sup>,</span>
+              <span class="author-block">Guoxi Zhang<sup>2,*</sup>,</span>
+              <span class="author-block">Jianwei Ma<sup>1,3,&dagger;</sup>,</span>
+              <span class="author-block">Qing Li<sup>2,&dagger;</sup></span>
+            </div>
+
+            <div class="is-size-5 publication-authors">
+              <span class="author-block"><sup>1</sup>Harbin Institute of Technology &nbsp;&nbsp; <sup>2</sup>Beijing Institute for General Artificial Intelligence (BIGAI) &nbsp;&nbsp; <sup>3</sup>Peking University</span>
+              <span class="eql-cntrb"><small><br><sup>*</sup>Equal Contribution &nbsp;&nbsp; <sup>&dagger;</sup>Corresponding Author</small></span>
+            </div>
+
+            <div class="column has-text-centered">
+              <div class="publication-links">
+                <span class="link-block">
+                  <a href="#" class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon"><i class="fas fa-file-pdf"></i></span>
+                    <span>Paper</span>
+                  </a>
+                </span>
+
+                <span class="link-block">
+                  <a href="#" class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon"><i class="ai ai-arxiv"></i></span>
+                    <span>arXiv</span>
+                  </a>
+                </span>
+
+                <span class="link-block">
+                  <a href="#" class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon"><i class="fab fa-github"></i></span>
+                    <span>Code</span>
+                  </a>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Teaser Video -->
+  <section class="hero teaser">
+    <div class="container is-max-desktop">
+      <div class="hero-body">
+        <video poster="" id="teaser" autoplay controls muted loop playsinline height="100%" preload="metadata">
+          <source src="static/videos/teaser.mp4" type="video/mp4">
+        </video>
+        <h2 class="subtitle has-text-centered">
+          HGR explores 3D environments by generating semantic hypotheses at frontiers, verifying predictions upon visitation, and cascading corrections through the dependency graph when errors are detected.
+        </h2>
+      </div>
+    </div>
+  </section>
+
+  <!-- Key Results -->
+  <section class="section">
+    <div class="container is-max-desktop">
+      <div class="key-results">
+        <div class="key-result-card">
+          <div class="key-result-number">72.4%</div>
+          <div class="key-result-label">Success Rate</div>
+          <div class="key-result-sublabel">GOAT-Bench</div>
+        </div>
+        <div class="key-result-card">
+          <div class="key-result-number">56.2%</div>
+          <div class="key-result-label">SPL</div>
+          <div class="key-result-sublabel">GOAT-Bench</div>
+        </div>
+        <div class="key-result-card">
+          <div class="key-result-number">4.5&times;</div>
+          <div class="key-result-label">Revisit Reduction</div>
+          <div class="key-result-sublabel">vs. 3D-Mem</div>
+        </div>
+        <div class="key-result-card">
+          <div class="key-result-number">~20%</div>
+          <div class="key-result-label">Nodes Pruned</div>
+          <div class="key-result-sublabel">Cascade Correction</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Abstract -->
+  <section class="section hero is-light">
+    <div class="container is-max-desktop">
+      <div class="columns is-centered has-text-centered">
+        <div class="column is-four-fifths">
+          <h2 class="title is-3">Abstract</h2>
+          <div class="content has-text-justified">
+            <p>
+              Embodied agents must explore partially observed environments while maintaining reliable long-horizon memory. Existing graph-based navigation systems improve scalability, but they often treat unexplored regions as semantically unknown, leading to inefficient frontier search. Although vision-language models (VLMs) can predict frontier semantics, erroneous predictions may be embedded into memory and propagate through downstream inferences, causing structural error accumulation that confidence attenuation alone cannot resolve. These observations call for a framework that can leverage semantic predictions for directed exploration while systematically retracting errors once new evidence contradicts them. We propose <strong>Hypothesis Graph Refinement (HGR)</strong>, a framework that represents frontier predictions as revisable hypothesis nodes in a dependency-aware graph memory. HGR introduces (1) <em>semantic hypothesis module</em>, which estimates context-conditioned semantic distributions over frontiers and ranks exploration targets by goal relevance, travel cost, and uncertainty, and (2) <em>verification-driven cascade correction</em>, which compares on-site observations against predicted semantics and, upon mismatch, retracts the refuted node together with all its downstream dependents. Unlike additive map-building, this allows the graph to contract by pruning erroneous subgraphs, keeping memory reliable throughout long episodes. We evaluate HGR on multimodal lifelong navigation (GOAT-Bench) and embodied question answering (A-EQA, EM-EQA). HGR achieves <strong>72.41% success rate</strong> and <strong>56.22% SPL</strong> on GOAT-Bench, and shows consistent improvements on both QA benchmarks. Diagnostic analysis reveals that cascade correction eliminates approximately 20% of structurally redundant hypothesis nodes and reduces revisits to erroneous regions by 4.5&times;, with specular and transparent surfaces accounting for 67% of corrected prediction errors.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Overview Figure -->
+  <section class="section">
+    <div class="container is-max-desktop">
+      <h2 class="title is-3 has-text-centered">Overview</h2>
+      <div class="figure-container">
+        <img src="static/images/overview.png" alt="Overview of Hypothesis Graph Refinement (HGR)">
+        <div class="figure-caption">
+          <strong>Overview of Hypothesis Graph Refinement (HGR).</strong>
+          The hypothesis graph separates <span style="color:#660099;font-weight:700;">observed nodes</span> (purple, verified regions) from <span style="color:#4d804d;font-weight:700;">hypothesis nodes</span> (green, probabilistic frontier predictions), enabling a hypothesis-verification-correction cycle.
+          <strong>(Left)</strong> Given the query "What is inside the basket?", observed nodes provide confirmed scene context, while hypothesis nodes project semantic distributions onto unexplored frontiers, guiding the agent toward the most likely location of the target object.
+          <strong>(Right)</strong> Upon arrival, the agent verifies each hypothesis against actual observations. If confirmed, the hypothesis node transitions to an observed node; if refuted, cascade correction retracts the erroneous node and all its downstream dependents.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- Method Section -->
+  <section class="section">
+    <div class="container is-max-desktop">
+      <h2 class="title is-3 has-text-centered">Method</h2>
+      <p class="has-text-centered" style="color:#64748b; margin-bottom:2rem;">
+        HGR addresses two intertwined challenges: frontiers lack semantic cues for efficient exploration, yet VLM-based predictions risk embedding errors that propagate over long horizons.
+      </p>
+
+      <!-- Architecture Figure -->
+      <div class="figure-container">
+        <img src="static/images/architecture.png" alt="Architecture of HGR">
+        <div class="figure-caption">
+          <strong>Architecture of HGR.</strong>
+          <strong>(Left)</strong> Frontiers detected from the occupancy map are fed to a VLM reasoner for semantic hypothesis generation, producing <span style="color:#4d804d;font-weight:700;">hypothesis nodes</span> linked to <span style="color:#660099;font-weight:700;">observed nodes</span> via spatial and dependency edges. Upon visitation, cascade correction compares predicted and actual semantics; if the residual exceeds the threshold, the refuted node and all its dependents are removed.
+          <strong>(Right)</strong> Running example on a floor plan showing graph refinement (confirmation) and graph shrinking (cascade correction).
+        </div>
+      </div>
+
+      <!-- Method Steps -->
+      <div class="method-overview">
+        <div class="method-step">
+          <div class="step-number">1</div>
+          <div class="step-content">
+            <h4>Hypothesis Graph Representation</h4>
+            <p>The graph G = (V, E, D) separates <em>observed nodes</em> (verified regions) from <em>hypothesis nodes</em> (frontier predictions). A dependency DAG D records derivation relationships, enabling systematic retraction when nodes are invalidated.</p>
+          </div>
+        </div>
+        <div class="method-step">
+          <div class="step-number">2</div>
+          <div class="step-content">
+            <h4>Semantic Hypothesis Module</h4>
+            <p>Projects probabilistic semantic distributions onto frontiers using VLM world knowledge. Exploration scoring balances goal alignment, travel cost, and uncertainty bonus (Shannon entropy) for directed frontier selection.</p>
+          </div>
+        </div>
+        <div class="method-step">
+          <div class="step-number">3</div>
+          <div class="step-content">
+            <h4>Verification-Driven Cascade Correction</h4>
+            <p>Upon visiting a hypothesis node, computes a prediction residual combining category mismatch, CLIP feature divergence, and object Jaccard dissimilarity. Refuted nodes trigger BFS traversal of the dependency DAG, removing the entire erroneous subgraph.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Semantic Projection Figure -->
+      <div class="figure-container">
+        <img src="static/images/semantic_projection.png" alt="Semantic Hypothesis Module" style="max-width:80%;">
+        <div class="figure-caption">
+          <strong>Semantic Hypothesis Module.</strong> Left: Traditional frontier representation treats unexplored regions as undifferentiated boundaries. Right: HGR projects probabilistic semantic distributions onto frontiers as hypothesis nodes, enabling goal-directed exploration.
+        </div>
+      </div>
+
+      <!-- Cascade Correction Figure -->
+      <div class="figure-container">
+        <img src="static/images/cascade_deletion.png" alt="Cascade Correction Example">
+        <div class="figure-caption">
+          <strong>Cascade Correction Example.</strong> A VLM misidentifies a mirror reflection as a bedroom entrance, generating hypothesis nodes for inferred furniture. Upon reaching the mirror and detecting a prediction violation, the system traces the dependency DAG and removes the entire erroneous subgraph, including all descendant hypothesis nodes.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- Results Section -->
+  <section class="section hero is-light">
+    <div class="container is-max-desktop">
+      <h2 class="title is-3 has-text-centered">Experimental Results</h2>
+
+      <!-- GOAT-Bench Main Results -->
+      <h3 class="title is-4" style="margin-top:2rem;">GOAT-Bench: Multimodal Lifelong Navigation</h3>
+      <p style="color:#64748b; margin-bottom:1rem;">HGR achieves the highest success rate and path efficiency on both the full validation set (2,780 subtasks) and the evaluation subset (278 subtasks).</p>
+
+      <div class="table-container">
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th rowspan="2" style="text-align:left;">Method</th>
+              <th colspan="2">Full Validation Set</th>
+              <th colspan="2">Subset</th>
+            </tr>
+            <tr>
+              <th>SR &uarr;</th>
+              <th>SPL &uarr;</th>
+              <th>SR &uarr;</th>
+              <th>SPL &uarr;</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="method-name">ConceptGraph</td>
+              <td>61.2</td><td>44.3</td><td>67.8</td><td>48.1</td>
+            </tr>
+            <tr>
+              <td class="method-name">3D-Mem w/o memory</td>
+              <td>58.6</td><td>38.5</td><td>66.2</td><td>44.1</td>
+            </tr>
+            <tr>
+              <td class="method-name">3D-Mem</td>
+              <td>62.9</td><td>44.7</td><td>69.1</td><td>48.9</td>
+            </tr>
+            <tr class="separator"><td colspan="5"></td></tr>
+            <tr class="ours">
+              <td class="method-name">HGR (Ours)</td>
+              <td><strong>64.14</strong></td><td><strong>50.1</strong></td><td><strong>72.41</strong></td><td><strong>56.22</strong></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Cumulative Success Figure -->
+      <div class="figure-container" style="margin-top:2rem;">
+        <img src="static/images/cumulative_success.png" alt="Cumulative Success Rate vs Episode Steps" style="max-width:80%;">
+        <div class="figure-caption">
+          <strong>Cumulative Success Rate vs. Episode Steps.</strong> HGR reaches navigation targets earlier than baselines due to hypothesis-driven frontier selection, while 3D-Mem and ConceptGraph require more steps for exhaustive geometric search. The gap widens in later steps as cascade correction prevents error accumulation.
+        </div>
+      </div>
+
+      <!-- Modality Results -->
+      <h3 class="title is-4" style="margin-top:2.5rem;">Performance by Target Modality</h3>
+      <p style="color:#64748b; margin-bottom:1rem;">HGR shows the largest gains on language-specified targets (+7.9% SR over 3D-Mem), as hypothesis nodes encode relational structure for disambiguating spatial references.</p>
+
+      <div class="table-container">
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th rowspan="2" style="text-align:left;">Method</th>
+              <th colspan="2">Category</th>
+              <th colspan="2">Language</th>
+              <th colspan="2">Image</th>
+            </tr>
+            <tr>
+              <th>SR</th><th>SPL</th><th>SR</th><th>SPL</th><th>SR</th><th>SPL</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="method-name">ConceptGraph</td>
+              <td>65.3</td><td>44.7</td><td>55.0</td><td>38.9</td><td>64.0</td><td>52.8</td>
+            </tr>
+            <tr>
+              <td class="method-name">3D-Mem</td>
+              <td>79.2</td><td>55.8</td><td>61.9</td><td>46.0</td><td>65.2</td><td>44.2</td>
+            </tr>
+            <tr class="separator"><td colspan="7"></td></tr>
+            <tr class="ours">
+              <td class="method-name">HGR (Ours)</td>
+              <td><strong>80.9</strong></td><td><strong>60.3</strong></td><td><strong>69.8</strong></td><td><strong>54.5</strong></td><td><strong>68.2</strong></td><td><strong>61.7</strong></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Ablation Study -->
+      <h3 class="title is-4" style="margin-top:2.5rem;">Ablation Study</h3>
+      <p style="color:#64748b; margin-bottom:1rem;">Systematic isolation of each component across all three benchmarks.</p>
+
+      <div class="table-container">
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th rowspan="2" style="text-align:left;">Configuration</th>
+              <th colspan="2">GOAT (Subset)</th>
+              <th>A-EQA</th>
+              <th>EM-EQA</th>
+            </tr>
+            <tr>
+              <th>SR &uarr;</th><th>SPL &uarr;</th><th>LLM &uarr;</th><th>LLM &uarr;</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="ours">
+              <td class="method-name">HGR (full system)</td>
+              <td><strong>72.41</strong></td><td><strong>56.22</strong></td><td><strong>55.9</strong></td><td><strong>58.3</strong></td>
+            </tr>
+            <tr>
+              <td class="method-name">&nbsp;&nbsp;w/o Semantic hypothesis</td>
+              <td>67.71</td><td>50.02</td><td>48.4</td><td>50.5</td>
+            </tr>
+            <tr>
+              <td class="method-name">&nbsp;&nbsp;w/o Cascade correction</td>
+              <td>68.61</td><td>51.12</td><td>49.6</td><td>52.9</td>
+            </tr>
+            <tr>
+              <td class="method-name">&nbsp;&nbsp;Local delete only</td>
+              <td>70.85</td><td>53.67</td><td>52.3</td><td>55.9</td>
+            </tr>
+            <tr>
+              <td class="method-name">&nbsp;&nbsp;w/o both (geometry only)</td>
+              <td>63.42</td><td>45.33</td><td>43.3</td><td>45.2</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- QA Results -->
+      <h3 class="title is-4" style="margin-top:2.5rem;">Embodied Question Answering</h3>
+
+      <div class="columns" style="margin-top:1rem;">
+        <div class="column">
+          <h4 class="title is-5">A-EQA (Active Embodied QA)</h4>
+          <div class="table-container">
+            <table class="results-table">
+              <thead>
+                <tr><th style="text-align:left;">Method</th><th>LLM-Match &uarr;</th><th>LLM-Match SPL &uarr;</th></tr>
+              </thead>
+              <tbody>
+                <tr class="group-header"><td colspan="3"><em>Blind LLMs (no visual input)</em></td></tr>
+                <tr><td class="method-name">GPT-4o</td><td>35.9</td><td>&mdash;</td></tr>
+                <tr class="group-header"><td colspan="3"><em>Question Agnostic Exploration</em></td></tr>
+                <tr><td class="method-name">LLaVA-1.5 Frame Captions</td><td>38.1</td><td>7.0</td></tr>
+                <tr><td class="method-name">Multi-Frame</td><td>41.8</td><td>7.5</td></tr>
+                <tr class="group-header"><td colspan="3"><em>VLM-Guided Exploration</em></td></tr>
+                <tr><td class="method-name">Explore-EQA</td><td>46.9</td><td>23.4</td></tr>
+                <tr><td class="method-name">ConceptGraph w/ Frontier</td><td>47.2</td><td>33.3</td></tr>
+                <tr class="separator"><td colspan="3"></td></tr>
+                <tr class="ours"><td class="method-name">HGR (Ours)</td><td><strong>55.9</strong></td><td><strong>45.0</strong></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="column">
+          <h4 class="title is-5">EM-EQA (Episodic Memory QA)</h4>
+          <div class="table-container">
+            <table class="results-table">
+              <thead>
+                <tr><th style="text-align:left;">Method</th><th>Avg. Frames</th><th>LLM-Match &uarr;</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="method-name">Blind LLM (GPT-4)</td><td>0</td><td>35.5</td></tr>
+                <tr><td class="method-name">ConceptGraph Captions</td><td>0</td><td>34.4</td></tr>
+                <tr><td class="method-name">Frame Captions</td><td>0</td><td>38.1</td></tr>
+                <tr class="separator"><td colspan="3"></td></tr>
+                <tr><td class="method-name">Multi-Frame</td><td>3.0</td><td>48.1</td></tr>
+                <tr class="ours"><td class="method-name">HGR (Ours)</td><td><strong>3.1</strong></td><td><strong>58.3</strong></td></tr>
+                <tr class="separator"><td colspan="3"></td></tr>
+                <tr><td class="method-name" style="color:#94a3b8;">Human (Full trajectory)</td><td style="color:#94a3b8;">Full</td><td style="color:#94a3b8;">86.8</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- Diagnostics Section -->
+  <section class="section">
+    <div class="container is-max-desktop">
+      <h2 class="title is-3 has-text-centered">Diagnostic Analysis</h2>
+      <p class="has-text-centered" style="color:#64748b; margin-bottom:2rem;">
+        Statistics on hypothesis lifecycle across the GOAT-Bench full validation set (2,780 subtasks).
+      </p>
+
+      <div class="diagnostic-grid">
+        <div class="diagnostic-item">
+          <div class="stat">4,712</div>
+          <h4>Hypothesis Nodes Created</h4>
+          <p>73.5% confirmed upon visitation, 26.5% refuted and removed.</p>
+        </div>
+        <div class="diagnostic-item">
+          <div class="stat">342</div>
+          <h4>Cascade Corrections Triggered</h4>
+          <p>Average 2.8 dependent nodes removed per trigger, max cascade depth of 4 hops.</p>
+        </div>
+        <div class="diagnostic-item">
+          <div class="stat">4.5&times;</div>
+          <h4>Revisit Reduction</h4>
+          <p>Revisit rate: 4.2% for HGR vs. 18.7% for 3D-Mem, directly contributing to SPL improvement.</p>
+        </div>
+        <div class="diagnostic-item">
+          <div class="stat">67%</div>
+          <h4>Mirror &amp; Glass Errors</h4>
+          <p>Specular (38%) and transparent (29%) surfaces are the dominant error source for VLM predictions.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- Qualitative Results -->
+  <section class="section hero is-light">
+    <div class="container is-max-desktop">
+      <h2 class="title is-3 has-text-centered">Qualitative Results</h2>
+      <div class="figure-container">
+        <img src="static/images/qualitative.png" alt="Qualitative Comparison">
+        <div class="figure-caption">
+          <strong>Qualitative Comparison: Mirror-Induced Prediction Error.</strong> Left: HGR detects the prediction violation and removes the erroneous subgraph via cascade correction, redirecting exploration to the actual living room. Right: 3D-Mem retains erroneous nodes with lowered confidence, leading to repeated misnavigation and step-limit failure.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="section-divider"></div>
+
+  <!-- BibTeX -->
+  <section class="section" id="BibTeX">
+    <div class="container is-max-desktop content">
+      <div class="bibtex-header">
+        <h2 class="title">BibTeX</h2>
+        <button class="copy-bibtex-btn" onclick="copyBibTeX()" title="Copy BibTeX to clipboard">
+          <i class="fas fa-copy"></i>
+          <span class="copy-text">Copy</span>
+        </button>
+      </div>
+      <pre id="bibtex-code"><code>@article{chen2026hgr,
+  title={Hypothesis Graph Refinement: Hypothesis-Driven Exploration with Cascade Error Correction for Embodied Navigation},
+  author={Chen, Peixin and Zhang, Guoxi and Ma, Jianwei and Li, Qing},
+  year={2026}
+}</code></pre>
+    </div>
+  </section>
+
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="columns is-centered">
+        <div class="column is-8">
+          <div class="content" style="text-align:center;">
+            <p>
+              This page was built using the <a href="https://github.com/eliahuhorwitz/Academic-project-page-template" target="_blank">Academic Project Page Template</a>.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
