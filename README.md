@@ -12,10 +12,10 @@
     <sup>*</sup>Equal Contribution &nbsp;&nbsp; <sup>&dagger;</sup>Corresponding Author
   </p>
   <p align="center">
-    <a href="PROJECT_WEB_URL">
+    <a href="https://chenpppx.github.io/Hypothesis_Graph_Refinement/">
       <img src='https://img.shields.io/badge/Project-Page-blue?style=flat&logo=Google%20chrome&logoColor=blue' alt='Project Page'>
     </a>
-    <a href="ARXIV_URL">
+    <a href="https://arxiv.org/abs/2604.04108">
       <img src='https://img.shields.io/badge/Paper-PDF-red?style=flat&logo=arXiv&logoColor=red' alt='Paper PDF'>
     </a>
   </p>
@@ -127,9 +127,13 @@ The codebase is built upon [OpenEQA](https://github.com/facebookresearch/open-eq
 ## Citation
 
 ```bibtex
-@article{chen2026hgr,
-  title={Hypothesis Graph Refinement: Hypothesis-Driven Exploration with Cascade Error Correction for Embodied Navigation},
-  author={Chen, Peixin and Zhang, Guoxi and Ma, Jianwei and Li, Qing},
-  year={2026}
+@misc{chen2026hypothesisgraphrefinementhypothesisdriven,
+      title={Hypothesis Graph Refinement: Hypothesis-Driven Exploration with Cascade Error Correction for Embodied Navigation},
+      author={Peixin Chen and Guoxi Zhang and Jianwei Ma and Qing Li},
+      year={2026},
+      eprint={2604.04108},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2604.04108},
 }
 ```
