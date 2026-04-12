@@ -105,6 +105,9 @@ def get_step_info(step, verbose=False):
     for frontier in step["frontier_imgs"]:
         frontier_imgs.append(encode_tensor2base64(frontier))
 
+    # 2.2.1 get frontier semantic predictions (Hypothesis Graph Refinement)
+    frontier_semantics = step.get("frontier_semantic_predictions", None)
+
     # 2.3 get snapshots
     snapshot_classes = {}  # rgb_id -> list of classes
     snapshot_full_imgs = {}  # rgb_id -> full img
@@ -171,6 +174,7 @@ def get_step_info(step, verbose=False):
         snapshot_crops,
         keep_index,
         keep_index_snapshot,
+        frontier_semantics,
     )
 
 
@@ -184,6 +188,7 @@ def format_explore_prompt(
     egocentric_view=False,
     use_snapshot_class=True,
     image_goal=None,
+    frontier_semantics=None,
 ):
     sys_prompt = "Task: You are an agent in an indoor scene that is able to observe the surroundings and explore the environment. You are tasked with indoor navigation, and you are required to choose either a Snapshot or a Frontier image to explore and find the target object required in the question.\n"
 
@@ -235,7 +240,7 @@ def format_explore_prompt(
                 )
             content.append(("\n",))
 
-    # 5 here is the frontier images
+    # 5 here is the frontier images with hypothesis semantic predictions
     text = "The followings are all the Frontiers that you can explore: \n"
     content.append((text,))
     if len(frontier_imgs) == 0:
@@ -243,6 +248,13 @@ def format_explore_prompt(
     else:
         for i in range(len(frontier_imgs)):
             content.append((f"Frontier {i} ", frontier_imgs[i]))
+            # Add hypothesis semantic predictions if available
+            if frontier_semantics is not None and i < len(frontier_semantics) and frontier_semantics[i] is not None:
+                pred = frontier_semantics[i]
+                cats = pred["predicted_categories"]
+                probs = pred["probabilities"]
+                pairs = ", ".join([f"{c} ({p:.2f})" for c, p in zip(cats, probs)])
+                content.append((f" [Predicted room types: {pairs}, Uncertainty: {pred['entropy']:.2f}]",))
             content.append(("\n",))
 
     # 6 here is the format of the answer
@@ -366,6 +378,7 @@ def explore_step(step, cfg, verbose=False):
         snapshot_crops,
         snapshot_id_mapping,
         snapshot_crop_mapping,
+        frontier_semantics,
     ) = get_step_info(step, verbose)
     sys_prompt, content = format_explore_prompt(
         question,
@@ -377,6 +390,7 @@ def explore_step(step, cfg, verbose=False):
         egocentric_view=step.get("use_egocentric_views", False),
         use_snapshot_class=True,
         image_goal=image_goal,
+        frontier_semantics=frontier_semantics,
     )
 
     if verbose:

@@ -77,3 +77,18 @@ scene_graph:
   iou_threshold: 0.5
   obj_include_dist: 3.5
   target_obj_iou_threshold: 0.6
+
+# Phase I & II: Hypothesis Graph Refinement
+hypothesis:
+  enable_hypothesis_refinement: true
+  enable_vlm_hypothesis_prediction: true
+  hypothesis_node_top_k_categories: 5
+  semantic_residual_threshold: 0.5
+  residual_weight_category: 0.4
+  residual_weight_feature: 0.3
+  residual_weight_objects: 0.3
+  enable_cascade_deletion: true
+  min_dependency_confidence: 0.6
+  enable_vlm_causality_diagnosis: true
+  use_hypothesis_node_semantics_in_prompt: true
+  enable_local_delete_only: false

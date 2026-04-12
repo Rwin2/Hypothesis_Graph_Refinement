@@ -35,9 +35,9 @@ SEMANTIC_CRITIC_CONFIG = {
     "semantic_residual_threshold": 0.5,  # Above this -> falsified
 
     # Residual computation weights
-    "residual_weight_category": 0.5,  # Weight for category matching
+    "residual_weight_category": 0.4,  # Weight for category matching
     "residual_weight_feature": 0.3,  # Weight for CLIP feature similarity
-    "residual_weight_objects": 0.2,  # Weight for object-level matching
+    "residual_weight_objects": 0.3,  # Weight for object-level matching
 
     # VLM-based causality diagnosis
     "enable_vlm_causality_diagnosis": True,  # Use VLM to diagnose falsification cause

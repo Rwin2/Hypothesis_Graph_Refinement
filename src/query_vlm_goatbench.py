@@ -9,6 +9,24 @@ from src.tsdf_planner import TSDFPlanner, SnapShot, Frontier
 from src.scene_goatbench import Scene
 
 
+
+def _infer_target_category(question: str):
+    """Simple heuristic to guess target room category from question text."""
+    q = question.lower()
+    room_keywords = {
+        "bedroom": ["bed", "sleep", "bedroom", "pillow", "nightstand"],
+        "bathroom": ["bath", "shower", "toilet", "bathroom", "sink"],
+        "kitchen": ["cook", "kitchen", "stove", "fridge", "refrigerator", "oven"],
+        "living_room": ["living", "sofa", "couch", "tv", "television"],
+        "dining_room": ["dining", "eat", "table"],
+        "office": ["desk", "office", "computer", "monitor"],
+    }
+    for room, keywords in room_keywords.items():
+        if any(kw in q for kw in keywords):
+            return room
+    return None
+
+
 def query_vlm_for_response(
     subtask_metadata: dict,
     scene: Scene,
@@ -78,10 +96,28 @@ def query_vlm_for_response(
                 }
             )
 
-    # prepare frontier
+    # prepare frontier with hypothesis semantics
     step_dict["frontier_imgs"] = [
         frontier.feature for frontier in tsdf_planner.frontiers
     ]
+    step_dict["frontier_semantic_predictions"] = []
+    for frontier in tsdf_planner.frontiers:
+        if hasattr(frontier, "semantic_dist") and frontier.semantic_dist is not None:
+            top_cats, top_probs = frontier.semantic_dist.get_top_k(3)
+            step_dict["frontier_semantic_predictions"].append({
+                "predicted_categories": top_cats,
+                "probabilities": [float(p) for p in top_probs],
+                "entropy": float(frontier.semantic_dist.entropy),
+            })
+        else:
+            step_dict["frontier_semantic_predictions"].append(None)
+
+    # Sort frontiers by exploration score if hypothesis refinement is enabled
+    if cfg.get("hypothesis", {}).get("enable_hypothesis_refinement", False):
+        target_category = _infer_target_category(subtask_metadata["question"])
+        if target_category and len(tsdf_planner.frontiers) > 0:
+            scored = tsdf_planner.rank_frontiers_by_exploration_score(target_category, None)
+            step_dict["frontier_scores"] = {idx: score for idx, score in scored}
 
     # prepare egocentric views
     if cfg.egocentric_views:

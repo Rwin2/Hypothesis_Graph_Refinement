@@ -159,9 +159,9 @@ class SemanticCritic:
             actual_observation.get("detected_objects", []),
         )
 
-        w1 = self.cfg.get("residual_weight_category", 0.5)
+        w1 = self.cfg.get("residual_weight_category", 0.4)
         w2 = self.cfg.get("residual_weight_feature", 0.3)
-        w3 = self.cfg.get("residual_weight_objects", 0.2)
+        w3 = self.cfg.get("residual_weight_objects", 0.3)
 
         return float(w1 * residual_category + w2 * residual_feature + w3 * residual_objects)
 

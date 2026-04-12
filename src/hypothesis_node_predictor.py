@@ -223,7 +223,7 @@ Candidate room types: {', '.join(self.common_room_categories)}
             lines.append(f"Nearby objects: {', '.join(nearby_objects[:10])}")
 
         explored_rooms = [hist.get("room_type", "Unknown") for hist in observed_history]
-        unique_rooms = sorted(set(explored_rooms))
+        unique_rooms = sorted(r for r in set(explored_rooms) if r is not None)
         lines.append(f"Explored rooms so far: {', '.join(unique_rooms)}")
         lines.append(f"Number of explored areas: {len(observed_history)}")
         return "\n".join(lines)

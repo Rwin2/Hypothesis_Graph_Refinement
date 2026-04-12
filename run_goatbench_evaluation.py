@@ -37,6 +37,8 @@ from src.scene_goatbench import Scene
 from src.utils import resize_image, calc_agent_subtask_distance, get_pts_angle_goatbench
 from src.goatbench_utils import prepare_goatbench_navigation_goals
 from src.query_vlm_goatbench import query_vlm_for_response
+from src.query_vlm_hypothesis import infer_room_type_from_objects
+from src.semantic_critic import SemanticCritic
 from src.logger_goatbench import Logger
 
 
@@ -165,7 +167,18 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                 pts_init=pts,
                 init_clearance=cfg.init_clearance * 2,
                 save_visualization=cfg.save_visualization,
+                hypothesis_graph_cfg=OmegaConf.to_container(cfg.hypothesis, resolve=True),
             )
+
+            # Phase II: Initialize Semantic Critic for hypothesis verification
+            if cfg.hypothesis.get("enable_hypothesis_refinement", True):
+                semantic_critic = SemanticCritic(
+                    cfg=OmegaConf.to_container(cfg.hypothesis, resolve=True),
+                    hypothesis_graph=tsdf_planner.hypothesis_graph,
+                )
+                semantic_critic.set_clip_model(clip_model, clip_preprocess)
+            else:
+                semantic_critic = None
 
             episode_dir, eps_frontier_dir, eps_snapshot_dir = logger.init_episode(
                 episode_id=f"{scene_id}_ep_{episode_id}"
@@ -218,7 +231,15 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                         pts_init=pts,
                         init_clearance=cfg.init_clearance * 2,
                         save_visualization=cfg.save_visualization,
+                        hypothesis_graph_cfg=OmegaConf.to_container(cfg.hypothesis, resolve=True),
                     )
+                    # Re-create semantic critic for new hypothesis graph
+                    if cfg.hypothesis.get("enable_hypothesis_refinement", True):
+                        semantic_critic = SemanticCritic(
+                            cfg=OmegaConf.to_container(cfg.hypothesis, resolve=True),
+                            hypothesis_graph=tsdf_planner.hypothesis_graph,
+                        )
+                        semantic_critic.set_clip_model(clip_model, clip_preprocess)
 
                 while cnt_step < num_step - 1:
                     cnt_step += 1
@@ -333,6 +354,16 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                         f"Step {cnt_step}, update snapshots, {len(scene.objects)} objects, {len(scene.snapshots)} snapshots"
                     )
 
+                    # Update observation history for hypothesis prediction
+                    for snap_key, snapshot in scene.snapshots.items():
+                        obj_names = [
+                            scene.objects[oid]["class_name"]
+                            for oid in snapshot.cluster
+                            if oid in scene.objects
+                        ]
+                        room_type = infer_room_type_from_objects(obj_names)
+                        tsdf_planner.update_observation_history(snapshot, room_type)
+
                     # (3) Update the Frontier Snapshots
                     update_success = tsdf_planner.update_frontier_map(
                         pts=pts,
@@ -424,6 +455,42 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     logging.info(
                         f"Current position: {pts}, {logger.subtask_explore_dist:.3f}"
                     )
+
+                    # (5.5) Phase II: Verify hypothesis node on frontier arrival
+                    if (
+                        semantic_critic is not None
+                        and type(max_point_choice) == Frontier
+                        and target_arrived
+                        and hasattr(max_point_choice, "hypothesis_node_id")
+                        and max_point_choice.hypothesis_node_id is not None
+                    ):
+                        detected_obj_names = [
+                            scene.objects[oid]["class_name"]
+                            for oid in all_added_obj_ids
+                            if oid in scene.objects
+                        ]
+                        from src.query_vlm_hypothesis import verify_hypothesis_node_arrival
+                        verification_result = verify_hypothesis_node_arrival(
+                            frontier=max_point_choice,
+                            scene=scene,
+                            tsdf_planner=tsdf_planner,
+                            semantic_critic=semantic_critic,
+                            actual_rgb=rgb,
+                            actual_depth=depth,
+                            detected_objects=detected_obj_names,
+                        )
+                        logging.info(f"[Phase II] Verification: {verification_result}")
+                        if verification_result.get("is_falsified", False):
+                            if cfg.hypothesis.get("enable_cascade_deletion", True):
+                                tsdf_planner.hypothesis_graph.prune_falsified_nodes()
+                            elif cfg.hypothesis.get("enable_local_delete_only", False):
+                                # Local delete only: remove just the falsified node, no cascade
+                                node_id = verification_result.get("hypothesis_node_id")
+                                if node_id and node_id in tsdf_planner.hypothesis_graph.nodes:
+                                    tsdf_planner.hypothesis_graph._remove_node(node_id)
+                            logging.info(
+                                f"[Phase II] Hypothesis graph stats: {tsdf_planner.get_hypothesis_graph_statistics()}"
+                            )
 
                     # sanity check about objects, scene graph, snapshots, ...
                     scene.sanity_check(cfg=cfg)

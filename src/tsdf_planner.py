@@ -1,4 +1,5 @@
 import os.path
+import logging
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -1051,40 +1052,76 @@ class TSDFPlanner(TSDFPlannerBase):
 
     def _predict_hypothesis_node_semantics(self, scene, pts_habitat):
         """
-        Predict semantic distributions for all frontiers (Hypothesis Nodes)
-        This implements Phase I: Generative Semantic Pre-filling
+        Predict semantic distributions for all frontiers (Hypothesis Nodes).
+        Implements Phase I with Dependency DAG construction (Appendix C).
         """
         if len(self.frontiers) == 0:
             return
 
-        # Prepare spatial context
+        # Deduplication: remove stale hypothesis nodes from previous steps
+        active_frontier_ids = {f.frontier_id for f in self.frontiers}
+        stale_node_ids = []
+        for node_id, node in list(self.hypothesis_graph.nodes.items()):
+            if node.node_type == NodeType.HYPOTHESIS and node.associated_object is not None:
+                if hasattr(node.associated_object, "frontier_id"):
+                    if node.associated_object.frontier_id not in active_frontier_ids:
+                        stale_node_ids.append(node_id)
+        for node_id in stale_node_ids:
+            self.hypothesis_graph._remove_node(node_id)
+
+        # Skip frontiers that already have valid hypothesis nodes
+        frontiers_needing_prediction = [
+            f for f in self.frontiers
+            if f.hypothesis_node_id is None or f.hypothesis_node_id not in self.hypothesis_graph.nodes
+        ]
+        if len(frontiers_needing_prediction) == 0:
+            return
+
         spatial_context = self._build_spatial_context(scene, pts_habitat)
-
-        # Batch predict semantic distributions for all frontiers
         predictions = self.hypothesis_node_predictor.batch_predict_frontiers(
-            frontiers=self.frontiers,
+            frontiers=frontiers_needing_prediction,
             spatial_context=spatial_context,
-            observed_history=self.observation_history
+            observed_history=self.observation_history,
         )
-
-        # Assign semantic distributions to frontiers and create Hypothesis Nodes
-        for frontier in self.frontiers:
+        for frontier in frontiers_needing_prediction:
             if frontier.frontier_id in predictions:
                 semantic_dist = predictions[frontier.frontier_id]
                 frontier.semantic_dist = semantic_dist
-
-                # Create Hypothesis Node and add to Hypothesis Graph
+                # Rule 1: Find nearest observed parent
+                parent_node_id = self._find_nearest_observed_parent(frontier)
                 hypothesis_node = create_hypothesis_node_from_frontier(
                     frontier=frontier,
                     semantic_dist=semantic_dist,
-                    parent_node_id=None  # No parent for initial frontiers
+                    parent_node_id=parent_node_id,
                 )
                 node_id = self.hypothesis_graph.add_node(hypothesis_node)
                 frontier.hypothesis_node_id = node_id
-
-                print(f"[Phase I] Created Hypothesis Node {node_id} for Frontier {frontier.frontier_id}")
+                # Create dependency edge (Rule 1)
+                if parent_node_id is not None and parent_node_id in self.hypothesis_graph.nodes:
+                    top_cats, top_probs = semantic_dist.get_top_k(1)
+                    confidence = float(top_probs[0]) if len(top_probs) > 0 else 0.5
+                    from src.hypothesis_graph import CognitiveDependency
+                    dep = CognitiveDependency(
+                        parent_id=parent_node_id,
+                        child_id=node_id,
+                        dependency_type="frontier_to_room",
+                        confidence=confidence,
+                        reasoning=f"Frontier {frontier.frontier_id} nearest to observed node {parent_node_id}",
+                    )
+                    try:
+                        self.hypothesis_graph.add_dependency(dep)
+                    except ValueError:
+                        pass
+                    # Rule 2: Room-to-object children
+                    self._create_room_to_object_hypotheses(node_id, semantic_dist)
+                logging.info(
+                    f"[Phase I] Hypothesis Node {node_id} for Frontier {frontier.frontier_id} (parent={parent_node_id})"
+                )
                 top_cats, top_probs = semantic_dist.get_top_k(3)
-                print(f"  Top-3 predictions: {list(zip(top_cats, [f'{p:.2f}' for p in top_probs]))}")
+                logging.info(
+                    f"  Top-3: {list(zip(top_cats, [f'{p:.2f}' for p in top_probs]))}"
+                )
+
 
     def _build_spatial_context(self, scene, pts_habitat) -> Dict:
         """
@@ -1120,15 +1157,129 @@ class TSDFPlanner(TSDFPlannerBase):
 
     def update_observation_history(self, snapshot: SnapShot, room_type: Optional[str] = None):
         """
-        Update observation history for Hypothesis Node prediction
+        Update observation history for Hypothesis Node prediction.
+        Capped at 100 entries to prevent unbounded memory growth.
         """
+        snapshot_id = snapshot.image
+        # Dedup: skip if same snapshot already recorded
+        if any(o["snapshot_id"] == snapshot_id for o in self.observation_history):
+            return
         observation = {
-            "snapshot_id": snapshot.image,
+            "snapshot_id": snapshot_id,
             "room_type": room_type,
             "position": snapshot.position,
             "objects": list(snapshot.cluster) if hasattr(snapshot, 'cluster') else []
         }
         self.observation_history.append(observation)
+        # Cap at 100 entries to bound memory
+        if len(self.observation_history) > 100:
+            self.observation_history = self.observation_history[-100:]
+
+    def _find_nearest_observed_parent(self, frontier) -> Optional[str]:
+        """
+        Rule 1 (Appendix C.1): Find the nearest observed node to link as parent.
+        Rule 3: Single-parent constraint - pick nearest (highest spatial relevance).
+        """
+        best_parent_id = None
+        best_distance = float('inf')
+        frontier_pos = frontier.position  # voxel coordinates
+        for node_id, node in self.hypothesis_graph.nodes.items():
+            if node.node_type != NodeType.OBSERVED:
+                continue
+            if node.position is None:
+                continue
+            dist = np.linalg.norm(
+                np.array(frontier_pos[:2], dtype=float) - np.array(node.position[:2], dtype=float)
+            )
+            if dist < best_distance:
+                best_distance = dist
+                best_parent_id = node_id
+        return best_parent_id
+
+    def _create_room_to_object_hypotheses(self, room_node_id: str, semantic_dist):
+        """
+        Rule 2 (Appendix C.2): Create child object hypothesis nodes for expected
+        objects in the predicted room category.
+        """
+        from src.hypothesis_graph import CognitiveDependency, SemanticDistribution
+        import time as _time
+        room_object_map = {
+            "bedroom": ["bed", "nightstand", "dresser", "wardrobe", "pillow"],
+            "bathroom": ["toilet", "sink", "shower", "bathtub", "mirror"],
+            "kitchen": ["stove", "oven", "refrigerator", "microwave", "sink"],
+            "living_room": ["sofa", "tv", "coffee_table", "lamp"],
+            "dining_room": ["dining_table", "chair"],
+            "hallway": ["door", "painting", "console_table"],
+            "closet": ["wardrobe", "shelf", "hanger"],
+            "office": ["desk", "chair", "monitor", "keyboard"],
+        }
+        top_cats, top_probs = semantic_dist.get_top_k(1)
+        if len(top_cats) == 0:
+            return
+        predicted_room = top_cats[0]
+        room_confidence = float(top_probs[0])
+        expected_objects = room_object_map.get(predicted_room, [])
+        if not expected_objects:
+            return
+        room_node = self.hypothesis_graph.nodes.get(room_node_id)
+        if room_node is None:
+            return
+        for obj_name in expected_objects[:3]:  # Limit to top-3 to avoid graph explosion
+            obj_prob = room_confidence * 0.5  # Discounted child confidence
+            obj_node = HypothesisNode(
+                node_id=f"obj_hyp_{obj_name}_{room_node_id}_{int(_time.time() * 1000)}",
+                node_type=NodeType.HYPOTHESIS,
+                status=NodeStatus.ACTIVE,
+                position=room_node.position,
+                semantic_dist=SemanticDistribution(
+                    categories=[obj_name],
+                    probabilities=np.array([1.0]),
+                    top_k=1,
+                ),
+                confidence=obj_prob,
+                parent_ids=[room_node_id],
+            )
+            child_id = self.hypothesis_graph.add_node(obj_node)
+            dep = CognitiveDependency(
+                parent_id=room_node_id,
+                child_id=child_id,
+                dependency_type="room_to_object",
+                confidence=obj_prob,
+                reasoning=f"Expected {obj_name} in predicted {predicted_room}",
+            )
+            try:
+                self.hypothesis_graph.add_dependency(dep)
+            except ValueError:
+                pass
+
+
+
+    def rank_frontiers_by_exploration_score(
+        self, target_category: str, current_pos=None
+    ) -> List[Tuple[int, float]]:
+        """
+        Compute exploration score S(f_j; g) for each frontier (Paper Eq. 2):
+        S = P(c_g | H_t, f_j) - lambda_d * d(f_j, p_t) + lambda_h * H[P(. | H_t, f_j)]
+        Returns list of (frontier_index, score) sorted by score descending.
+        """
+        lambda_d = self.hypothesis_graph_cfg.get("distance_weight", 0.1)
+        lambda_h = self.hypothesis_graph_cfg.get("entropy_weight", 0.05)
+        scores = []
+        cur_voxel = current_pos[:2] if current_pos is not None else np.array(self.init_points[0][:2], dtype=float)
+        for i, frontier in enumerate(self.frontiers):
+            if frontier.semantic_dist is not None:
+                goal_alignment = frontier.semantic_dist.get_expected_semantic_score(target_category)
+                entropy = frontier.semantic_dist.entropy
+            else:
+                goal_alignment = 0.0
+                entropy = 0.0
+            dist = np.linalg.norm(
+                np.array(frontier.position[:2], dtype=float) - np.array(cur_voxel[:2], dtype=float)
+            ) * self._voxel_size  # convert to meters
+            score = goal_alignment - lambda_d * dist + lambda_h * entropy
+            scores.append((i, float(score)))
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return scores
 
     def get_hypothesis_graph_statistics(self) -> Dict:
         """
