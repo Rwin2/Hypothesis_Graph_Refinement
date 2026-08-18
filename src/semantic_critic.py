@@ -137,6 +137,10 @@ class SemanticCritic:
     def _compute_semantic_residual(
         self, hypothesis_node: HypothesisNode, actual_observation: Dict
     ) -> float:
+        if self.cfg.get("use_farm_perception", False):
+            return self._compute_semantic_residual_v2(
+                hypothesis_node, actual_observation
+            )
         if "semantic_class" in actual_observation:
             actual_class = actual_observation["semantic_class"]
             expected_prob = hypothesis_node.semantic_dist.get_expected_semantic_score(
@@ -164,6 +168,115 @@ class SemanticCritic:
         w3 = self.cfg.get("residual_weight_objects", 0.3)
 
         return float(w1 * residual_category + w2 * residual_feature + w3 * residual_objects)
+
+    def _compute_semantic_residual_v2(
+        self, hypothesis_node: HypothesisNode, actual_observation: Dict
+    ) -> float:
+        """v2 (use_farm_perception): the same 0.4/0.3/0.3 three-term residual,
+        each term rebuilt open-vocab on embeddings.
+
+        - category: 1 - Sum_r P(r) * max_q cos(E(pred room r), E(obs room q))
+          (vanilla is the same probability-weighted sum with a 0/1 exact-match
+          indicator and a single observed label).
+        - feature:  1 - cos(VL(arrival view), VL(frontier image)) via the
+          shared Qwen3-VL space :8006 (vanilla's CLIP term was inoperative).
+        - objects:  1 - Sum_r P(r) * mean-top-k cos(E(nearby FARM caption),
+          E(pred room r)) (vanilla used a fixed 8-room object map).
+        Missing evidence degrades each term to 0.5, exactly like vanilla.
+        """
+        from src.hypothesis_node_predictor import _get_text_embedder, _get_vl_embedder
+
+        sd = hypothesis_node.semantic_dist
+        pred_cats = list(sd.categories) if sd is not None else []
+        pred_probs = (
+            np.asarray(sd.probabilities, dtype=float) if sd is not None else np.array([])
+        )
+
+        # --- category term ---
+        residual_category = 0.5
+        observed_dist = actual_observation.get("observed_room_dist")
+        observed_cats = (
+            list(observed_dist.categories) if observed_dist is not None else []
+        )
+        if not observed_cats and actual_observation.get("semantic_class"):
+            observed_cats = [actual_observation["semantic_class"]]
+        if pred_cats and observed_cats:
+            try:
+                emb = _get_text_embedder(self.cfg)
+                embs = emb.embed(pred_cats + observed_cats)
+                total = 0.0
+                for cat, prob in zip(pred_cats, pred_probs):
+                    pv = embs.get(cat)
+                    if pv is None:
+                        continue
+                    best = 0.0
+                    for oc in observed_cats:
+                        ov = embs.get(oc)
+                        if ov is not None:
+                            best = max(best, float(np.dot(pv, ov)))
+                    total += float(prob) * max(0.0, best)
+                residual_category = 1.0 - min(1.0, total)
+            except Exception as exc:
+                print(f"[Semantic Critic] v2 category residual failed: {exc}")
+
+        # --- feature term ---
+        residual_feature = 0.5
+        actual_image = actual_observation.get("rgb_image")
+        expected_image = hypothesis_node.feature
+        if isinstance(expected_image, torch.Tensor):
+            expected_image = expected_image.detach().cpu().numpy()
+        if actual_image is not None and isinstance(expected_image, np.ndarray):
+            try:
+                vl = _get_vl_embedder(self.cfg)
+                va = vl.embed_image(np.asarray(actual_image))
+                ve = vl.embed_image(
+                    expected_image,
+                    cache_key=f"node_feature_{hypothesis_node.node_id}",
+                )
+                if va is not None and ve is not None:
+                    residual_feature = 1.0 - max(0.0, float(np.dot(va, ve)))
+            except Exception as exc:
+                print(f"[Semantic Critic] v2 feature residual failed: {exc}")
+
+        # --- objects term ---
+        residual_objects = 0.5
+        captions = [
+            c for c in actual_observation.get("nearby_captions", []) or [] if c
+        ]
+        if pred_cats and captions:
+            try:
+                emb = _get_text_embedder(self.cfg)
+                embs = emb.embed(pred_cats + captions)
+                weighted_match = 0.0
+                weight_total = 0.0
+                top_k = 5
+                for cat, prob in zip(pred_cats, pred_probs):
+                    pv = embs.get(cat)
+                    if pv is None:
+                        continue
+                    sims = sorted(
+                        (
+                            max(0.0, float(np.dot(embs[c], pv)))
+                            for c in captions
+                            if c in embs
+                        ),
+                        reverse=True,
+                    )[:top_k]
+                    if not sims:
+                        continue
+                    weighted_match += float(prob) * (sum(sims) / len(sims))
+                    weight_total += float(prob)
+                if weight_total > 0:
+                    residual_objects = 1.0 - weighted_match / weight_total
+            except Exception as exc:
+                print(f"[Semantic Critic] v2 objects residual failed: {exc}")
+
+        w1 = self.cfg.get("residual_weight_category", 0.4)
+        w2 = self.cfg.get("residual_weight_feature", 0.3)
+        w3 = self.cfg.get("residual_weight_objects", 0.3)
+        return float(
+            w1 * residual_category + w2 * residual_feature + w3 * residual_objects
+        )
 
     def _compute_feature_residual(
         self, expected_feature: torch.Tensor, actual_image: Optional[np.ndarray]

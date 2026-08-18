@@ -5,3 +5,8 @@ __pycache__/
 results/
 wandb/
 *.log
+
+# model weights (downloaded at setup; exceed GitHub file limits)
+sam_l.pt
+mobileclip_blt.ts
+yolov8x-world.pt

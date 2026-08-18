@@ -54,6 +54,20 @@ from src.conceptgraph.slam.mapping import (
     match_detections_to_objects,
 )
 from src.conceptgraph.utils.model_utils import compute_clip_features_batched
+from src.farm_graph_adapter import FarmLiveGraph
+
+
+class _FarmBBox:
+    """Minimal bbox shim for the FARM-perception object mirror.
+
+    Vanilla code only ever reads ``bbox.center`` (a 3-vector in habitat world
+    frame); here that is the FARM object's Gaussian mean.
+    """
+
+    __slots__ = ("center",)
+
+    def __init__(self, center: np.ndarray):
+        self.center = center
 
 
 class Scene:
@@ -141,6 +155,31 @@ class Scene:
         )  # object_id -> object item
         self.object_id_counter = 1
 
+        # REAL FARM scene graph (only used when the flag is on). Each HGR frame
+        # is fed into FARM's actual perception pipeline (YOLOE open-vocab +
+        # DINOv3 + vLLM captions), and hypothesis reasoning reads FARM's graph.
+        # Vanilla behavior is untouched when hypothesis.use_farm_graph is False.
+        _hyp_cfg = self.cfg.get("hypothesis", {}) if hasattr(self.cfg, "get") else {}
+        self.use_farm_graph = bool(
+            _hyp_cfg.get("use_farm_graph", False) if hasattr(_hyp_cfg, "get") else False
+        )
+        # v2 FARM-only perception: HGR's YOLO-World+SAM+CLIP stack is skipped
+        # entirely and scene.objects / frames / snapshots are mirrored from
+        # FARM's live scene graph (see _update_scene_graph_farm). Implies
+        # use_farm_graph. All vanilla paths untouched when the flag is off.
+        self.use_farm_perception = bool(
+            _hyp_cfg.get("use_farm_perception", False)
+            if hasattr(_hyp_cfg, "get")
+            else False
+        )
+        if self.use_farm_perception:
+            self.use_farm_graph = True
+        self._farm_seen_ids = set()  # canonical FARM ids admitted to the mirror
+        # Lazy: FARM models load on the first integrated frame, so nothing heavy
+        # happens here (and nothing at all when the flag is off).
+        self.farm_graph = FarmLiveGraph() if self.use_farm_graph else None
+        self._farm_graph_logged = False
+
         self.snapshots: Dict[str, SnapShot] = {}  # image_path -> snapshot
         self.frames: Dict[str, SnapShot] = {}  # image_path -> all frames
         self.all_observations: Dict[str, np.ndarray] = (
@@ -152,13 +191,15 @@ class Scene:
             random_state=66,
         )
 
-        # setup detection and segmentation models
+        # setup detection and segmentation models (None under use_farm_perception:
+        # FARM's YOLOE+DINOv3 is the only perception, these are never used)
         self.detection_model = detection_model
-        self.detection_model.set_classes(self.obj_classes.get_classes_arr())
+        if detection_model is not None:
+            self.detection_model.set_classes(self.obj_classes.get_classes_arr())
 
         self.sam_predictor = sam_predictor
 
-        self.clip_model = clip_model.to(self.device)
+        self.clip_model = clip_model.to(self.device) if clip_model is not None else None
         self.clip_preprocess = clip_preprocess
         self.clip_tokenizer = clip_tokenizer
 
@@ -175,6 +216,7 @@ class Scene:
         self.snapshots = {}
         self.frames = {}
         self.all_observations = {}
+        self._farm_seen_ids = set()
 
     def get_observation(self, pts, angle=None, rotation=None):
         assert (angle is None) ^ (
@@ -315,6 +357,30 @@ class Scene:
         assert not (
             (semantic_obs is None) ^ (gt_target_obj_ids is None)
         ), "semantic_obs and gt_target_obj_ids should be both None or both not None"
+
+        # v2 FARM-only perception: FARM is the sole perception + object memory;
+        # HGR's YOLO-World+SAM+CLIP stack below never runs. scene.objects /
+        # frames keep their vanilla structure, mirrored from FARM state.
+        if self.use_farm_perception:
+            return self._update_scene_graph_farm(
+                image_rgb=image_rgb,
+                depth=depth,
+                intrinsics=intrinsics,
+                cam_pos=cam_pos,
+                pts=pts,
+                pts_voxel=pts_voxel,
+                img_path=img_path,
+                frame_idx=frame_idx,
+                semantic_obs=semantic_obs,
+                gt_target_obj_ids=gt_target_obj_ids,
+            )
+
+        # REAL FARM integration: feed this raw RGB-D frame into FARM's own
+        # perception pipeline (YOLOE + DINOv3 + captions). Done FIRST, before
+        # HGR's ConceptGraph detection early-returns, so FARM sees every frame.
+        # Gated: only runs when hypothesis.use_farm_graph is True.
+        if self.use_farm_graph and self.farm_graph is not None:
+            self._integrate_farm_graph(image_rgb, depth, intrinsics, cam_pos, frame_idx)
 
         # set up object_classes first
         obj_classes = self.obj_classes
@@ -585,6 +651,215 @@ class Scene:
 
         return annotated_image, added_obj_ids, target_obj_id_mapping
 
+    def _update_scene_graph_farm(
+        self,
+        image_rgb,
+        depth,
+        intrinsics,
+        cam_pos,
+        pts,
+        pts_voxel,
+        img_path,
+        frame_idx,
+        semantic_obs=None,
+        gt_target_obj_ids=None,
+    ):
+        """FARM-only perception update (use_farm_perception).
+
+        Runs FARM's real pipeline on the frame, then fills the exact vanilla
+        structures from FARM state: a per-frame SnapShot (full_obj_list +
+        visual_prompt bboxes from FARM's YOLOE detections) and the
+        scene.objects mirror ({id, class_name=caption, num_detections, conf,
+        bbox.center=FARM mean, image}), so snapshot clustering, decision-prompt
+        crops, navigation, and success checks all run unchanged.
+        """
+        try:
+            frame_result = self.farm_graph.integrate_frame(
+                rgb=image_rgb,
+                depth=depth,
+                intrinsics=intrinsics,
+                cam_pos_habitat=cam_pos,
+                frame_idx=frame_idx,
+            )
+        except Exception as exc:
+            logging.error(
+                "[FARM-PERC] integrate_frame failed: %s", exc, exc_info=True
+            )
+            return image_rgb, [], {}
+
+        objs_full = self.farm_graph.objects_full()
+
+        # Keep detections whose FARM object is within the vanilla include
+        # distance (XZ), exactly like filter_gobs_with_distance.
+        kept = []
+        for det in (frame_result or {}).get("detections", []):
+            cid = self.farm_graph.resolve_object_id(det["object_id"])
+            if cid is None or cid not in objs_full or det["bbox_xyxy"] is None:
+                continue
+            mean = np.asarray(objs_full[cid]["mean"], dtype=np.float64)
+            if (
+                np.linalg.norm(mean[[0, 2]] - pts[[0, 2]])
+                > self.cfg.scene_graph.obj_include_dist
+            ):
+                continue
+            kept.append((cid, det))
+
+        # GT alignment: same IoU rule as vanilla, on FARM's detection masks.
+        target_obj_id_mapping = {}
+        if semantic_obs is not None and gt_target_obj_ids is not None and kept:
+            for target_gt_id in gt_target_obj_ids:
+                target_obj_mask = semantic_obs == target_gt_id
+                if (
+                    np.sum(target_obj_mask)
+                    / (target_obj_mask.shape[0] * target_obj_mask.shape[1])
+                    > 0.0001
+                ):
+                    max_iou = -1
+                    max_iou_obj_id = None
+                    for cid, det in kept:
+                        if det["mask"] is None:
+                            continue
+                        iou_score = IoU(det["mask"], target_obj_mask)
+                        if iou_score > max_iou:
+                            max_iou = iou_score
+                            max_iou_obj_id = cid
+                    if max_iou > self.cfg.scene_graph.target_obj_iou_threshold:
+                        target_obj_id_mapping[target_gt_id] = max_iou_obj_id
+                        logging.info(
+                            f"Target object {target_gt_id} detected with IoU {max_iou} in {img_path}!!!"
+                        )
+
+        prev_ids = set(self.objects.keys())
+        prev_meta = {
+            obj_id: (obj.get("conf", 1.0), obj.get("image", None))
+            for obj_id, obj in self.objects.items()
+        }
+
+        # Frame SnapShot (vanilla shape), only when something was kept.
+        if kept:
+            frame = SnapShot(
+                image=img_path,
+                color=(random.random(), random.random(), random.random()),
+                obs_point=pts_voxel,
+            )
+            frame.full_obj_list = {cid: float(det["score"]) for cid, det in kept}
+            det_visual_prompt = sv.Detections(
+                xyxy=np.stack(
+                    [np.asarray(det["bbox_xyxy"], dtype=np.float64) for _, det in kept]
+                ),
+                class_id=np.zeros(len(kept), dtype=int),
+            )
+            det_visual_prompt.data["obj_id"] = [cid for cid, _ in kept]
+            frame.visual_prompt = det_visual_prompt
+            self.frames[img_path] = frame
+            self._farm_seen_ids.update(cid for cid, _ in kept)
+
+        # Rebuild the object mirror from FARM state (canonical, active only).
+        canonical_seen = set()
+        merge_winners = set()
+        for sid in self._farm_seen_ids:
+            r = self.farm_graph.resolve_object_id(sid)
+            if r is not None and r in objs_full:
+                canonical_seen.add(r)
+                if r != sid:
+                    merge_winners.add(r)
+        self._farm_seen_ids = set(canonical_seen)
+
+        # Prune vanished ids from frames AND snapshots (vanilla drop-style).
+        # The SnapShot objects are shared between the two dicts, but each dict
+        # may hold entries the other lost, so both must be swept and emptied
+        # entries popped from both.
+        self._prune_dead_ids(canonical_seen)
+
+        # Vanilla invariant: every object must appear in >= 1 stored frame
+        # (the clustering assigns each cluster a covering frame and crashes
+        # otherwise). A FARM merge winner that was never itself detected
+        # within include-distance has no covering frame -> keep it out of the
+        # mirror until it is re-detected nearby (its id stays in seen).
+        covered = set()
+        for ss in self.frames.values():
+            covered.update(ss.full_obj_list.keys())
+
+        det_conf = {cid: float(det["score"]) for cid, det in kept}
+        new_objects = MapObjectDict()
+        for cid in canonical_seen & covered:
+            info = objs_full[cid]
+            conf, image = prev_meta.get(cid, (det_conf.get(cid, 1.0), None))
+            new_objects[cid] = {
+                "id": cid,
+                "class_name": info["name"],
+                "class_id": [0],
+                "num_detections": int(info["num_detections"]),
+                "conf": float(conf),
+                "pcd": None,
+                "bbox": _FarmBBox(np.asarray(info["mean"], dtype=np.float64)),
+                "clip_ft": None,
+                "image": image,
+            }
+        self.objects = new_objects
+
+        # Second sweep: restrict everything to the mirror.
+        self._prune_dead_ids(set(self.objects.keys()))
+
+        # Newly added mirror ids + merge winners (their snapshot membership may
+        # have changed) + any object left in no snapshot cluster, so
+        # update_snapshots' invariants always hold.
+        added_obj_ids = [cid for cid in canonical_seen if cid not in prev_ids]
+        added_obj_ids += [cid for cid in merge_winners if cid not in added_obj_ids]
+        clustered = {
+            oid for snap in self.snapshots.values() for oid in snap.cluster
+        }
+        for cid in canonical_seen:
+            if cid not in clustered and cid not in added_obj_ids:
+                added_obj_ids.append(cid)
+
+        return image_rgb, added_obj_ids, target_obj_id_mapping
+
+    def _prune_dead_ids(self, valid_ids):
+        """Drop ids outside ``valid_ids`` from every frame/snapshot (both
+        dicts, shared SnapShot objects; pruning twice is idempotent), popping
+        entries whose full_obj_list empties from BOTH dicts."""
+        for dct in (self.frames, self.snapshots):
+            for filename in list(dct.keys()):
+                ss = dct[filename]
+                ss.full_obj_list = {
+                    oid: conf
+                    for oid, conf in ss.full_obj_list.items()
+                    if oid in valid_ids
+                }
+                ss.cluster = [oid for oid in ss.cluster if oid in valid_ids]
+                if len(ss.full_obj_list) == 0:
+                    self.frames.pop(filename, None)
+                    self.snapshots.pop(filename, None)
+
+    def _integrate_farm_graph(self, image_rgb, depth, intrinsics, cam_pos, frame_idx):
+        """Feed one raw HGR RGB-D frame into FARM's REAL perception pipeline.
+
+        Delegates to ``FarmLiveGraph.integrate_frame`` which runs FARM's own
+        YOLOE open-vocab segmentation + DINOv3 merge features + 3D Gaussian
+        fusion + union-find correspondence + async vLLM captioning, and updates
+        FARM's ``scene_state`` in place. ``intrinsics`` is HGR's 4x4 camera
+        matrix; ``cam_pos`` is HGR's habitat ``cam_pose`` (converted to FARM's
+        OpenCV ``T_world_cam`` inside ``integrate_frame``).
+        """
+        try:
+            self.farm_graph.integrate_frame(
+                rgb=image_rgb,
+                depth=depth,
+                intrinsics=intrinsics,
+                cam_pos_habitat=cam_pos,
+                frame_idx=frame_idx,
+            )
+        except Exception as exc:
+            logging.error("[FARM-REAL] integrate_frame failed: %s", exc, exc_info=True)
+            return
+        if not self._farm_graph_logged:
+            logging.info(
+                "[FARM-REAL] ENABLED: HGR frames now build FARM's real scene "
+                "graph; hypothesis nearby_objects sourced from it"
+            )
+            self._farm_graph_logged = True
+
     def filter_gobs_with_distance(self, pts, gobs):
         idx_to_keep = []
         for idx in range(len(gobs["bbox"])):
@@ -804,6 +1079,12 @@ class Scene:
 
     def periodic_cleanup_objects(self, frame_idx, pts, goal_obj_ids_mapping=None):
         ### Perform post-processing periodically if told so
+
+        # FARM-only perception: FARM does its own denoise/merge/deactivate and
+        # the mirror in _update_scene_graph_farm handles pruning; the vanilla
+        # pcd-based cleanup below cannot run (mirror objects have no pcd).
+        if self.use_farm_perception:
+            return
 
         # Denoising
         if processing_needed(

@@ -3,6 +3,8 @@
 import logging
 from typing import Dict, Optional, Tuple, Union
 
+import numpy as np
+
 from src.eval_utils_gpt_aeqa import explore_step
 from src.scene_aeqa import Scene
 from src.semantic_critic import SemanticCritic
@@ -144,6 +146,7 @@ def verify_hypothesis_node_arrival(
     actual_rgb,
     actual_depth,
     detected_objects: list,
+    pts=None,
 ) -> Dict:
     if (
         not hasattr(frontier, "hypothesis_node_id")
@@ -172,6 +175,36 @@ def verify_hypothesis_node_arrival(
         if detected_objects
         else None,
     }
+
+    # v2 (use_farm_perception): open-vocab OBSERVED room from the same room
+    # predictor the hypothesis stage uses, run on the arrival view + nearby
+    # FARM captions; plus the captions themselves for the objects residual.
+    if bool(tsdf_planner.hypothesis_graph_cfg.get("use_farm_perception", False)):
+        try:
+            spatial_context = (
+                tsdf_planner._build_spatial_context(scene, pts)
+                if pts is not None
+                else {"nearby_objects": [], "current_room_type": None}
+            )
+            observed_dist = tsdf_planner.hypothesis_node_predictor._predict_with_vlm(
+                actual_rgb,
+                spatial_context,
+                tsdf_planner.observation_history,
+            )
+            if observed_dist is not None and len(observed_dist.categories) > 0:
+                actual_observation["observed_room_dist"] = observed_dist
+                top_cats, _ = observed_dist.get_top_k(1)
+                actual_observation["semantic_class"] = top_cats[0]
+        except Exception as exc:
+            logging.warning(f"[Phase II] open-vocab observed-room prediction failed: {exc}")
+        try:
+            fg = getattr(scene, "farm_graph", None)
+            if fg is not None and pts is not None:
+                actual_observation["nearby_captions"] = fg.query_nearby(
+                    np.asarray(pts, dtype=float), radius=5.0
+                )
+        except Exception:
+            pass
 
     logging.info(f"[Phase II] Verifying Hypothesis Node {hypothesis_node_id}")
     verification_report = semantic_critic.verify_hypothesis_node_arrival(

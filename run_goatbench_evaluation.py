@@ -40,6 +40,86 @@ from src.query_vlm_goatbench import query_vlm_for_response
 from src.query_vlm_hypothesis import infer_room_type_from_objects
 from src.semantic_critic import SemanticCritic
 from src.logger_goatbench import Logger
+from src.reasoning_viz import ReasoningViz
+
+
+def _build_viz_record(
+    scene,
+    tsdf_planner,
+    subtask_id,
+    subtask_metadata,
+    goal_type,
+    step,
+    pts,
+    max_point_choice,
+):
+    """Assemble one reasoning-viz record from state known at decision time.
+
+    Read-only: reads planner frontiers (semantic room dists + stashed scores),
+    the stashed VLM reason, and nearby FARM captions. Never mutates anything.
+    """
+    scores = getattr(tsdf_planner, "_viz_last_frontier_scores", {}) or {}
+    reason = getattr(tsdf_planner, "_viz_last_reason", None)
+
+    frontiers = []
+    for idx, fr in enumerate(tsdf_planner.frontiers):
+        room_pred = []
+        uncertainty = None
+        sd = getattr(fr, "semantic_dist", None)
+        if sd is not None:
+            try:
+                cats, probs = sd.get_top_k(4)
+                room_pred = [[str(c), float(p)] for c, p in zip(cats, probs)]
+                uncertainty = float(sd.entropy)
+            except Exception:
+                pass
+        frontiers.append(
+            {
+                "id": idx,
+                "room_prediction": room_pred,
+                "score": (float(scores[idx]) if idx in scores else None),
+                "uncertainty": uncertainty,
+            }
+        )
+
+    # Decision type/target.
+    dtype, dtarget = "unknown", None
+    try:
+        if type(max_point_choice) == Frontier:
+            dtype = "frontier"
+            for idx, fr in enumerate(tsdf_planner.frontiers):
+                if fr is max_point_choice:
+                    dtarget = idx
+                    break
+        elif type(max_point_choice) == SnapShot:
+            dtype = "snapshot"
+            dtarget = getattr(max_point_choice, "image", None)
+    except Exception:
+        pass
+
+    # Nearby FARM captions (read-only query into the live FARM graph).
+    nearby_captions = []
+    try:
+        fg = getattr(scene, "farm_graph", None)
+        if getattr(scene, "use_farm_graph", False) and fg is not None:
+            nearby_captions = fg.query_nearby(np.asarray(pts, dtype=float), radius=5.0)
+    except Exception:
+        pass
+
+    # scene id is the subtask_id prefix (e.g. "00871-VBzV5z6i1WS_0_0" -> scene).
+    scene_id = str(subtask_id).rsplit("_", 2)[0] if subtask_id else None
+
+    return {
+        "scene": scene_id,
+        "subtask_id": subtask_id,
+        "goal_type": goal_type,
+        "goal_text": subtask_metadata.get("question"),
+        "step": int(step),
+        "agent_position": [float(x) for x in np.asarray(pts, dtype=float).reshape(-1)],
+        "frontiers": frontiers,
+        "decision": {"type": dtype, "target": dtarget, "reason": reason},
+        "nearby_captions": list(nearby_captions),
+    }
 
 
 def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
@@ -76,23 +156,40 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
         cfg.scene_data_path + "/val"
     )
 
-    # load detection and segmentation models
-    detection_model = YOLOWorld(cfg.yolo_model_name)
-    logging.info(f"Load YOLO model {cfg.yolo_model_name} successful!")
-
-    sam_predictor = SAM(cfg.sam_model_name)  # UltraLytics SAM
-    logging.info(f"Load SAM model {cfg.sam_model_name} successful!")
-
-    clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
-        "ViT-B-32", "laion2b_s34b_b79k"  # "ViT-H-14", "laion2b_s32b_b79k"
+    # load detection and segmentation models. Under v2 FARM-only perception
+    # (hypothesis.use_farm_perception) HGR's YOLO-World+SAM+CLIP never run:
+    # FARM's YOLOE+DINOv3 is the sole perception, so skip loading them.
+    use_farm_perception = bool(
+        cfg.get("hypothesis", {}).get("use_farm_perception", False)
     )
-    clip_tokenizer = open_clip.get_tokenizer("ViT-B-32")
-    logging.info(f"Load CLIP model successful!")
+    if use_farm_perception:
+        detection_model = None
+        sam_predictor = None
+        clip_model, clip_preprocess, clip_tokenizer = None, None, None
+        logging.info(
+            "[FARM-PERC] use_farm_perception: skipping YOLO-World/SAM/CLIP "
+            "loads; FARM YOLOE+DINOv3 is the only perception stack"
+        )
+    else:
+        detection_model = YOLOWorld(cfg.yolo_model_name)
+        logging.info(f"Load YOLO model {cfg.yolo_model_name} successful!")
+
+        sam_predictor = SAM(cfg.sam_model_name)  # UltraLytics SAM
+        logging.info(f"Load SAM model {cfg.sam_model_name} successful!")
+
+        clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
+            "ViT-B-32", "laion2b_s34b_b79k"  # "ViT-H-14", "laion2b_s32b_b79k"
+        )
+        clip_tokenizer = open_clip.get_tokenizer("ViT-B-32")
+        logging.info(f"Load CLIP model successful!")
 
     # Initialize the logger
     logger = Logger(
         cfg.output_dir, start_ratio, end_ratio, split, voxel_size=cfg.tsdf_grid_size
     )
+
+    # Reasoning visualization (flag-gated; no-op when disabled -> zero overhead).
+    viz = ReasoningViz(cfg, exp_name=cfg.get("exp_name", None))
 
     for scene_data_file in scene_data_list:
         # load goatbench data
@@ -432,6 +529,27 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                             )
                             break
 
+                        # (4.5) Reasoning viz capture (no-op unless enabled).
+                        # Runs only when the VLM was just queried, so frontier
+                        # scores + room predictions + decision + reason are all
+                        # known for this step. Capture only; no control flow.
+                        if viz.enabled:
+                            try:
+                                viz.log_step(
+                                    _build_viz_record(
+                                        scene=scene,
+                                        tsdf_planner=tsdf_planner,
+                                        subtask_id=subtask_id,
+                                        subtask_metadata=subtask_metadata,
+                                        goal_type=goal_type,
+                                        step=cnt_step,
+                                        pts=pts,
+                                        max_point_choice=max_point_choice,
+                                    )
+                                )
+                            except Exception as _viz_exc:
+                                logging.info(f"[REASONING-VIZ] capture skipped: {_viz_exc}")
+
                     # (5) Agent navigate to the target point for one step
                     return_values = tsdf_planner.agent_step(
                         pts=pts,
@@ -478,6 +596,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                             actual_rgb=rgb,
                             actual_depth=depth,
                             detected_objects=detected_obj_names,
+                            pts=pts,
                         )
                         logging.info(f"[Phase II] Verification: {verification_result}")
                         if verification_result.get("is_falsified", False):

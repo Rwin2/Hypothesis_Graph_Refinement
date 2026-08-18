@@ -229,6 +229,19 @@ class HypothesisGraph:
         if actual_class is None:
             return 1.0
 
+        # OPEN-VOCAB: predicted vs observed room compared by embedding cosine
+        # similarity instead of exact category equality (gated; default OFF).
+        if self.cfg.get("use_open_vocab_rooms", False):
+            try:
+                from src.hypothesis_node_predictor import _get_text_embedder
+
+                sim = _get_text_embedder(self.cfg).max_similarity(
+                    list(node.semantic_dist.categories), str(actual_class)
+                )
+                return float(1.0 - max(0.0, min(1.0, sim)))
+            except Exception as exc:  # fall back to exact match on any embedder error
+                print(f"[OPEN-VOCAB-ROOM] residual embedding fallback: {exc}")
+
         expected_prob = node.semantic_dist.get_expected_semantic_score(actual_class)
         return 1.0 - expected_prob
 

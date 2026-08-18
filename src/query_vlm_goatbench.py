@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Tuple, Optional, Union
 import random
 import numpy as np
@@ -97,6 +98,9 @@ def query_vlm_for_response(
             )
 
     # prepare frontier with hypothesis semantics
+    use_farm_perception = bool(
+        cfg.get("hypothesis", {}).get("use_farm_perception", False)
+    )
     step_dict["frontier_imgs"] = [
         frontier.feature for frontier in tsdf_planner.frontiers
     ]
@@ -104,20 +108,61 @@ def query_vlm_for_response(
     for frontier in tsdf_planner.frontiers:
         if hasattr(frontier, "semantic_dist") and frontier.semantic_dist is not None:
             top_cats, top_probs = frontier.semantic_dist.get_top_k(3)
+            if use_farm_perception:
+                # v2: uncertainty on one 0-1 scale regardless of label count.
+                from src.hypothesis_node_predictor import normalized_entropy
+
+                entropy_val = normalized_entropy(frontier.semantic_dist)
+            else:
+                entropy_val = float(frontier.semantic_dist.entropy)
             step_dict["frontier_semantic_predictions"].append({
                 "predicted_categories": top_cats,
                 "probabilities": [float(p) for p in top_probs],
-                "entropy": float(frontier.semantic_dist.entropy),
+                "entropy": entropy_val,
             })
         else:
             step_dict["frontier_semantic_predictions"].append(None)
 
     # Sort frontiers by exploration score if hypothesis refinement is enabled
+    frontier_index_mapping = None  # prompt frontier index -> planner index
     if cfg.get("hypothesis", {}).get("enable_hypothesis_refinement", False):
+        use_open_vocab = cfg.get("hypothesis", {}).get("use_open_vocab_rooms", False)
         target_category = _infer_target_category(subtask_metadata["question"])
-        if target_category and len(tsdf_planner.frontiers) > 0:
-            scored = tsdf_planner.rank_frontiers_by_exploration_score(target_category, None)
+        # OPEN-VOCAB goal text: object goals -> category string; description goals
+        # -> the description; image goals -> no text (embedding term falls back).
+        goal_text = None
+        goal_image = None
+        if use_open_vocab:
+            if subtask_metadata.get("task_type") == "description":
+                goal_text = subtask_metadata.get("question")
+            elif subtask_metadata.get("task_type") != "image":
+                goal_text = subtask_metadata.get("class")
+        if use_farm_perception and subtask_metadata.get("task_type") == "image":
+            # v2: image goals rank via the shared Qwen3-VL embedding space.
+            goal_image = subtask_metadata.get("image")
+        # When open-vocab is on we rank even without a fixed target_category, as
+        # long as we have goal text; otherwise keep the vanilla gating.
+        if (
+            target_category
+            or (use_open_vocab and goal_text)
+            or (use_farm_perception and goal_image)
+        ) and len(tsdf_planner.frontiers) > 0:
+            scored = tsdf_planner.rank_frontiers_by_exploration_score(
+                target_category, None, goal_text=goal_text, goal_image=goal_image
+            )
             step_dict["frontier_scores"] = {idx: score for idx, score in scored}
+            if use_farm_perception and scored:
+                # v2: present frontiers to the VLM sorted by exploration score
+                # (paper Eq. 2 pre-ranking; the released code computed the
+                # score but never applied the sort).
+                frontier_index_mapping = [idx for idx, _ in scored]
+                step_dict["frontier_imgs"] = [
+                    step_dict["frontier_imgs"][idx] for idx in frontier_index_mapping
+                ]
+                step_dict["frontier_semantic_predictions"] = [
+                    step_dict["frontier_semantic_predictions"][idx]
+                    for idx in frontier_index_mapping
+                ]
 
     # prepare egocentric views
     if cfg.egocentric_views:
@@ -142,6 +187,19 @@ def query_vlm_for_response(
         logging.error(f"explore_step failed and returned None")
         return None
     logging.info(f"Response: [{outputs}]\nReason: [{reason}]")
+
+    # Stash the VLM reason + per-frontier scores/semantics on the planner so the
+    # reasoning viz can build a record from the main loop WITHOUT changing this
+    # function's return signature. Guarded so it is a no-op unless viz is on.
+    if os.environ.get("HGR_REASONING_VIZ", "") or cfg.get("reasoning_viz", False):
+        try:
+            tsdf_planner._viz_last_reason = reason
+            tsdf_planner._viz_last_frontier_scores = step_dict.get("frontier_scores", {})
+            tsdf_planner._viz_last_frontier_semantics = step_dict.get(
+                "frontier_semantic_predictions", []
+            )
+        except Exception:
+            pass
 
     # parse returned results
     try:
@@ -210,6 +268,15 @@ def query_vlm_for_response(
         return max_point_choice, n_filtered_snapshots
     else:  # target_type == "frontier"
         target_index = int(target_index)
+        if frontier_index_mapping is not None:
+            # v2 sorted presentation: map the prompt index back to the
+            # planner's frontier list.
+            if target_index < 0 or target_index >= len(frontier_index_mapping):
+                logging.info(
+                    f"Predicted frontier target index out of range: {target_index}, failed!"
+                )
+                return None
+            target_index = frontier_index_mapping[target_index]
         if target_index < 0 or target_index >= len(tsdf_planner.frontiers):
             logging.info(
                 f"Predicted frontier target index out of range: {target_index}, failed!"

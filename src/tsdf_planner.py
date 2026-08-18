@@ -174,6 +174,10 @@ class TSDFPlanner(TSDFPlannerBase):
         pts_habitat = pts.copy()
         pts = pos_habitat_to_normal(pts)
         cur_point = self.normal2voxel(pts)
+        # Remember the agent's position so frontier ranking can measure travel
+        # cost from the AGENT (v2 use_farm_perception) instead of the episode
+        # start. Pure bookkeeping; no vanilla behavior reads it.
+        self._last_agent_cur_point = np.array(cur_point[:2], dtype=float)
 
         island, unoccupied = self.get_island_around_pts(
             pts, height=self.occupancy_height
@@ -1134,21 +1138,43 @@ class TSDFPlanner(TSDFPlannerBase):
             if hasattr(scene, 'start_position') else 0.0
         }
 
-        # Get nearby objects from scene
-        if hasattr(scene, 'objects') and len(scene.objects) > 0:
-            current_pos_voxel = self.habitat2voxel(pts_habitat)[:2]
+        current_pos_voxel = self.habitat2voxel(pts_habitat)[:2]
+        # Find objects within certain radius
+        nearby_radius_voxel = 5.0 / self._voxel_size  # 5 meters in voxel units
 
-            # Find objects within certain radius
-            nearby_radius_voxel = 5.0 / self._voxel_size  # 5 meters in voxel units
-            for obj_id, obj_data in scene.objects.items():
-                if "bbox" in obj_data and hasattr(obj_data["bbox"], "center"):
-                    obj_center = obj_data["bbox"].center
-                    obj_center_voxel = self.habitat2voxel(obj_center)[:2]
-                    distance = np.linalg.norm(obj_center_voxel - current_pos_voxel)
+        use_farm_graph = bool(getattr(scene, "use_farm_graph", False))
+        farm_graph = getattr(scene, "farm_graph", None)
+        if use_farm_graph and farm_graph is not None:
+            # Source nearby_objects from FARM's REAL object graph (built by
+            # feeding HGR's frames through FARM's perception pipeline). Query in
+            # the SAME 2D voxel coordinate frame and with the SAME radius as the
+            # vanilla ConceptGraph path below (FARM means are in the habitat
+            # world frame, like the vanilla bbox centers), so the only change is
+            # the SOURCE of the object set.
+            farm_objs = farm_graph.objects
+            if not getattr(self, "_farm_graph_query_logged", False):
+                logging.info(
+                    "[FARM-REAL] hypothesis nearby_objects sourced from FARM's "
+                    f"real scene graph ({farm_graph.num_objects()} objects)"
+                )
+                self._farm_graph_query_logged = True
+            for obj in farm_objs:
+                obj_center_voxel = self.habitat2voxel(np.asarray(obj["mean"]))[:2]
+                distance = np.linalg.norm(obj_center_voxel - current_pos_voxel)
+                if distance < nearby_radius_voxel:
+                    spatial_context["nearby_objects"].append(obj["object_category"])
+        else:
+            # Vanilla: nearby objects from the ConceptGraph scene objects.
+            if hasattr(scene, 'objects') and len(scene.objects) > 0:
+                for obj_id, obj_data in scene.objects.items():
+                    if "bbox" in obj_data and hasattr(obj_data["bbox"], "center"):
+                        obj_center = obj_data["bbox"].center
+                        obj_center_voxel = self.habitat2voxel(obj_center)[:2]
+                        distance = np.linalg.norm(obj_center_voxel - current_pos_voxel)
 
-                    if distance < nearby_radius_voxel:
-                        class_name = obj_data.get("class_name", "unknown")
-                        spatial_context["nearby_objects"].append(class_name)
+                        if distance < nearby_radius_voxel:
+                            class_name = obj_data.get("class_name", "unknown")
+                            spatial_context["nearby_objects"].append(class_name)
 
         # Deduplicate nearby objects
         spatial_context["nearby_objects"] = list(set(spatial_context["nearby_objects"]))
@@ -1255,20 +1281,88 @@ class TSDFPlanner(TSDFPlannerBase):
 
 
     def rank_frontiers_by_exploration_score(
-        self, target_category: str, current_pos=None
+        self, target_category: str, current_pos=None, goal_text: str = None,
+        goal_image: str = None,
     ) -> List[Tuple[int, float]]:
         """
         Compute exploration score S(f_j; g) for each frontier (Paper Eq. 2):
         S = P(c_g | H_t, f_j) - lambda_d * d(f_j, p_t) + lambda_h * H[P(. | H_t, f_j)]
         Returns list of (frontier_index, score) sorted by score descending.
+
+        When ``hypothesis.use_open_vocab_rooms`` is on, the goal-alignment term
+        P(c_g | .) is replaced by the max embedding cosine similarity between the
+        frontier's (open-vocab, free-text) predicted room labels and ``goal_text``
+        (falling back to ``target_category`` if no goal text is supplied). Travel
+        cost and entropy terms are unchanged.
         """
         lambda_d = self.hypothesis_graph_cfg.get("distance_weight", 0.1)
         lambda_h = self.hypothesis_graph_cfg.get("entropy_weight", 0.05)
+        use_open_vocab = bool(self.hypothesis_graph_cfg.get("use_open_vocab_rooms", False))
+        use_farm_perception = bool(
+            self.hypothesis_graph_cfg.get("use_farm_perception", False)
+        )
+        relevance_text = goal_text if goal_text else target_category
         scores = []
         cur_voxel = current_pos[:2] if current_pos is not None else np.array(self.init_points[0][:2], dtype=float)
+        if use_farm_perception and current_pos is None:
+            # v2 fix: travel cost from the AGENT's last known position, not the
+            # episode start point.
+            last = getattr(self, "_last_agent_cur_point", None)
+            if last is not None:
+                cur_voxel = np.array(last[:2], dtype=float)
+
+        if use_farm_perception:
+            # v2 score (approved design): relevance * exp(-lambda_d * d) +
+            # lambda_h * normalized entropy, with probability-weighted
+            # embedding relevance (text goals via :8002, image goals via the
+            # shared Qwen3-VL space :8006).
+            from src.hypothesis_node_predictor import normalized_entropy
+
+            for i, frontier in enumerate(self.frontiers):
+                sd = frontier.semantic_dist
+                if sd is not None:
+                    if relevance_text:
+                        relevance = (
+                            self.hypothesis_node_predictor.expected_goal_relevance(
+                                sd, relevance_text
+                            )
+                        )
+                    elif goal_image:
+                        relevance = (
+                            self.hypothesis_node_predictor.expected_goal_relevance_image(
+                                sd, goal_image
+                            )
+                        )
+                    else:
+                        relevance = 0.0
+                    entropy_n = normalized_entropy(sd)
+                else:
+                    relevance = 0.0
+                    entropy_n = 0.0
+                dist = np.linalg.norm(
+                    np.array(frontier.position[:2], dtype=float)
+                    - np.array(cur_voxel[:2], dtype=float)
+                ) * self._voxel_size
+                score = relevance * float(np.exp(-lambda_d * dist)) + lambda_h * entropy_n
+                scores.append((i, float(score)))
+            scores.sort(key=lambda x: x[1], reverse=True)
+            return scores
+
         for i, frontier in enumerate(self.frontiers):
             if frontier.semantic_dist is not None:
-                goal_alignment = frontier.semantic_dist.get_expected_semantic_score(target_category)
+                if use_open_vocab and relevance_text:
+                    goal_alignment = self.hypothesis_node_predictor.room_goal_relevance(
+                        frontier.semantic_dist, relevance_text
+                    )
+                    if i == 0:
+                        top_cats, _ = frontier.semantic_dist.get_top_k(3)
+                        print(
+                            "[OPEN-VOCAB-ROOM] frontier ranking: goal='"
+                            f"{relevance_text}' vs rooms={top_cats} -> "
+                            f"embedding relevance={goal_alignment:.3f}"
+                        )
+                else:
+                    goal_alignment = frontier.semantic_dist.get_expected_semantic_score(target_category)
                 entropy = frontier.semantic_dist.entropy
             else:
                 goal_alignment = 0.0
