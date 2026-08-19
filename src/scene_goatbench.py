@@ -782,9 +782,23 @@ class Scene:
 
         det_conf = {cid: float(det["score"]) for cid, det in kept}
         new_objects = MapObjectDict()
-        for cid in canonical_seen & covered:
+        # Two FARM objects (e.g. same-frame cannot-linked) can share an
+        # identical mean to float precision; exactly-duplicate 2D centers send
+        # the snapshot clustering's bisecting k-means into an infinite
+        # non-progress loop. Nudge exact duplicates by 0.1 mm (deterministic,
+        # ordered by id) — imperceptible for navigation.
+        seen_xz = {}
+        for cid in sorted(canonical_seen & covered):
             info = objs_full[cid]
             conf, image = prev_meta.get(cid, (det_conf.get(cid, 1.0), None))
+            center = np.asarray(info["mean"], dtype=np.float64).copy()
+            key = (round(float(center[0]), 6), round(float(center[2]), 6))
+            bump = seen_xz.get(key, 0)
+            seen_xz[key] = bump + 1
+            if bump:
+                center[0] += 1e-4 * bump
+            info = dict(info, mean=center)
+            objs_full[cid] = info
             new_objects[cid] = {
                 "id": cid,
                 "class_name": info["name"],
