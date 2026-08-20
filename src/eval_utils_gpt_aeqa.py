@@ -4,10 +4,12 @@ from PIL import Image
 import base64
 from io import BytesIO
 import os
+import sys
 import time
 from typing import Optional
 import logging
 from src.const import *
+from src import latency_profiler as _lprof
 
 
 client = OpenAI(
@@ -42,7 +44,9 @@ def call_openai_api(sys_prompt, contents) -> Optional[str]:
         {"role": "system", "content": sys_prompt},
         {"role": "user", "content": formated_content},
     ]
+    _lp_kind = sys._getframe(1).f_code.co_name if _lprof.enabled() else None
     while retry_count < max_tries:
+        _lp_t0 = time.monotonic()
         try:
             completion = client.chat.completions.create(
                 model="gpt-4o",  # model = "deployment_name"
@@ -53,13 +57,30 @@ def call_openai_api(sys_prompt, contents) -> Optional[str]:
                 frequency_penalty=0,
                 presence_penalty=0,
             )
+            _lprof.llm_call(
+                _lp_kind,
+                sys_prompt,
+                contents,
+                completion.choices[0].message.content,
+                getattr(completion, "usage", None),
+                time.monotonic() - _lp_t0,
+                attempt=retry_count,
+            )
             return completion.choices[0].message.content
         except openai.RateLimitError as e:
+            _lprof.llm_call(
+                _lp_kind, sys_prompt, contents, None, None,
+                time.monotonic() - _lp_t0, attempt=retry_count, error=e,
+            )
             print("Rate limit error, waiting for 60s")
             time.sleep(30)
             retry_count += 1
             continue
         except Exception as e:
+            _lprof.llm_call(
+                _lp_kind, sys_prompt, contents, None, None,
+                time.monotonic() - _lp_t0, attempt=retry_count, error=e,
+            )
             print("Error: ", e)
             time.sleep(60)
             retry_count += 1

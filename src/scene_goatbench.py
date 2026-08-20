@@ -24,6 +24,7 @@ from src.habitat import (
 )
 from src.geom import get_cam_intr, IoU
 from src.utils import rgba2rgb
+from src import latency_profiler as _lprof
 from src.tsdf_planner import SnapShot
 from src.hierarchy_clustering import SceneHierarchicalClustering
 
@@ -386,7 +387,9 @@ class Scene:
         obj_classes = self.obj_classes
 
         # Detect objects
+        _lprof.tick0("perc")
         results = self.detection_model.predict(image_rgb, conf=0.1, verbose=False)
+        _lprof.tick("van_yolo_world", chan="perc")
         confidences = results[0].boxes.conf.cpu().numpy()
         detection_class_ids = results[0].boxes.cls.cpu().numpy().astype(int)
         detection_class_labels = [
@@ -408,6 +411,7 @@ class Scene:
             masks_np = masks_tensor.cpu().numpy()
         else:
             masks_np = np.empty((0, *image_rgb.shape[:2]), dtype=np.float64)
+        _lprof.tick("van_sam", chan="perc")
 
         # Create a detections object that we will save later
         curr_det = sv.Detections(
@@ -444,6 +448,7 @@ class Scene:
             obj_classes.get_classes_arr(),
             self.device,
         )
+        _lprof.tick("van_clip", chan="perc")
 
         raw_gobs = {
             # add new uuid for each detection
@@ -519,6 +524,7 @@ class Scene:
         ]
 
         # filter out objects that are far away
+        _lprof.tick("van_pcd", chan="perc")
         gobs = self.filter_gobs_with_distance(pts, gobs)
 
         detection_list = self.make_detection_list_from_pcd_and_gobs(
@@ -649,6 +655,7 @@ class Scene:
             )
             annotated_image = LABEL_ANNOTATOR.annotate(annotated_image, det_visualize)
 
+        _lprof.tick("van_match_merge", chan="perc")
         return annotated_image, added_obj_ids, target_obj_id_mapping
 
     def _update_scene_graph_farm(
@@ -673,6 +680,7 @@ class Scene:
         bbox.center=FARM mean, image}), so snapshot clustering, decision-prompt
         crops, navigation, and success checks all run unchanged.
         """
+        _lprof.tick0("perc")
         try:
             frame_result = self.farm_graph.integrate_frame(
                 rgb=image_rgb,
@@ -687,7 +695,9 @@ class Scene:
             )
             return image_rgb, [], {}
 
+        _lprof.tick("farm_integrate_frame", chan="perc")
         objs_full = self.farm_graph.objects_full()
+        _lprof.tick("farm_objects_full", chan="perc")
 
         # Keep detections whose FARM object is within the vanilla include
         # distance (XZ), exactly like filter_gobs_with_distance.
@@ -827,6 +837,7 @@ class Scene:
             if cid not in clustered and cid not in added_obj_ids:
                 added_obj_ids.append(cid)
 
+        _lprof.tick("farm_mirror", chan="perc")
         return image_rgb, added_obj_ids, target_obj_id_mapping
 
     def _prune_dead_ids(self, valid_ids):

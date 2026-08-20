@@ -8,6 +8,7 @@ import torch
 
 from src.eval_utils_gpt_aeqa import call_openai_api, encode_tensor2base64
 from src.hypothesis_graph import SemanticDistribution
+from src import latency_profiler as _lprof
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +43,15 @@ class _TextEmbedder:
         want = [t for t in dict.fromkeys(texts) if t]  # de-dup, drop empty
         missing = [t for t in want if t not in self._cache]
         if missing:
+            import time as _time
+
+            _lp_t0 = _time.monotonic()
             resp = self._client.embeddings.create(model=self._model, input=missing)
+            _lprof.embed_call(
+                "text_embed_8002",
+                _time.monotonic() - _lp_t0,
+                n_texts=len(missing),
+            )
             for t, item in zip(missing, resp.data):
                 v = np.asarray(item.embedding, dtype=np.float32)
                 n = float(np.linalg.norm(v))
@@ -128,7 +137,15 @@ class _VLEmbedder:
             "encoding_format": "float",
         }
         try:
+            import time as _time
+
+            _lp_t0 = _time.monotonic()
             resp = requests.post(self._url(), json=payload, timeout=30)
+            _lprof.embed_call(
+                "vl_embed_8006",
+                _time.monotonic() - _lp_t0,
+                content_types=[c.get("type") for c in content],
+            )
             if not resp.ok:
                 return None
             rows = resp.json().get("data") or []

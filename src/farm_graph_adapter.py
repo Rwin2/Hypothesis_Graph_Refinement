@@ -35,6 +35,8 @@ from typing import List, Optional
 
 import numpy as np
 
+from src import latency_profiler as _lprof
+
 try:  # torch is always present in HGR; keep the import defensive anyway.
     import torch
 except Exception:  # pragma: no cover
@@ -204,6 +206,7 @@ class FarmLiveGraph:
         scene_state = self._scene_state
         cm = self._caption_manager
 
+        _lprof.tick0("farm")
         # Register the frame FIRST (as the orchestrator does) so detection image
         # ids are valid for caption crops.
         batch_image_ids = self._register_batch_images(
@@ -213,6 +216,7 @@ class FarmLiveGraph:
         seg = steps.segment_and_transform(
             self._segmenter, [color_t], [depth_t], [K_t], [pose_t]
         )
+        _lprof.tick("farm_segment", chan="farm")
         n_det = len(seg.get("means", []))
         detection_image_ids = self._compute_detection_image_ids(
             seg, batch_image_ids, n_det
@@ -221,6 +225,7 @@ class FarmLiveGraph:
         rgb_obs = (
             self._compute_caption_observations(seg, [color_t]) if n_det else []
         )
+        _lprof.tick("farm_caption_obs", chan="farm", n_det=n_det)
 
         neighbors, _ = steps.find_neighbors_for_detections(seg, scene_state)
         det_idx, obj_idx = steps.resolve_correspondence(
@@ -230,6 +235,7 @@ class FarmLiveGraph:
             detection_image_ids=detection_image_ids,
             seg_outputs=seg,
         )
+        _lprof.tick("farm_associate", chan="farm")
         update_info = steps.update_state_and_enqueue_captions(
             scene_state,
             seg,
@@ -240,6 +246,7 @@ class FarmLiveGraph:
             cm,
             self._pending_caption_indices,
         )
+        _lprof.tick("farm_update_state", chan="farm")
 
         # Per-frame detection -> FARM object mapping, for the FARM-only
         # perception mode (use_farm_perception). Mirrors the det_to_obj
@@ -322,11 +329,13 @@ class FarmLiveGraph:
             % self._caption_step_interval
             == 0
         )
+        _lprof.tick("farm_det_mapping", chan="farm")
         if should_process and self._pending_caption_indices:
             cm.enqueue_objects(self._pending_caption_indices)
             self._pending_caption_indices.clear()
         if should_process:
             cm.drain_results()
+        _lprof.tick("farm_caption_cadence", chan="farm")
         self._step_index += 1
 
         if not self._enabled_logged:

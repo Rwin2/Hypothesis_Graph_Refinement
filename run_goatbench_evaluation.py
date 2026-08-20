@@ -41,6 +41,7 @@ from src.query_vlm_hypothesis import infer_room_type_from_objects
 from src.semantic_critic import SemanticCritic
 from src.logger_goatbench import Logger
 from src.reasoning_viz import ReasoningViz
+from src import latency_profiler as _lprof
 
 
 def _build_viz_record(
@@ -345,6 +346,24 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                         f"\n== step: {cnt_step}, global step: {global_step} =="
                     )
 
+                    # Latency profiling (diagnostics only, no-op unless enabled)
+                    _lprof.set_context(
+                        subtask_id=subtask_id,
+                        step=cnt_step,
+                        task_type=subtask_metadata.get("task_type"),
+                        goal=subtask_metadata.get("class"),
+                    )
+                    _lprof.tick("step_total", chan="step")
+                    _lprof.tick("stage_start", chan="stage")
+                    _lprof.record(
+                        "step_state",
+                        0,
+                        n_objects=len(scene.objects),
+                        n_snapshots=len(scene.snapshots),
+                        n_frames=len(scene.frames),
+                        n_frontiers=len(tsdf_planner.frontiers),
+                    )
+
                     # (1) Observe the surroundings, update the scene graph and occupancy map
                     # Determine the viewing angles for the current step
                     if cnt_step == 0:
@@ -368,6 +387,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     for view_idx, ang in enumerate(all_angles):
                         # For each view
                         obs, cam_pose = scene.get_observation(pts, angle=ang)
+                        _lprof.tick("get_observation", chan="stage", view=view_idx)
                         rgb = obs["color_sensor"]
                         depth = obs["depth_sensor"]
                         semantic_obs = obs["semantic_sensor"]
@@ -389,6 +409,9 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                                     semantic_obs=semantic_obs,
                                     gt_target_obj_ids=subtask_metadata["goal_obj_ids"],
                                 )
+                            )
+                            _lprof.tick(
+                                "update_scene_graph", chan="stage", view=view_idx
                             )
                             scene.all_observations[obs_file_name] = rgb
                             rgb_egocentric_views.append(
@@ -417,6 +440,9 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                             pts=pts,
                             goal_obj_ids_mapping=goal_obj_ids_mapping,
                         )
+                        _lprof.tick(
+                            "save_and_cleanup", chan="stage", view=view_idx
+                        )
 
                         # Update depth map, occupancy map
                         tsdf_planner.integrate(
@@ -429,6 +455,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                             margin_w=int(cfg.margin_w_ratio * img_width),
                             explored_depth=cfg.explored_depth,
                         )
+                        _lprof.tick("tsdf_integrate", chan="stage", view=view_idx)
                     logging.info(f"Goal object mapping: {goal_obj_ids_mapping}")
 
                     # (2) Update Memory Snapshots with hierarchical clustering
@@ -447,6 +474,12 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                     scene.update_snapshots(
                         obj_ids=set(all_added_obj_ids), min_detection=cfg.min_detection
                     )
+                    _lprof.tick(
+                        "update_snapshots",
+                        chan="stage",
+                        n_objects=len(scene.objects),
+                        n_snapshots=len(scene.snapshots),
+                    )
                     logging.info(
                         f"Step {cnt_step}, update snapshots, {len(scene.objects)} objects, {len(scene.snapshots)} snapshots"
                     )
@@ -460,6 +493,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                         ]
                         room_type = infer_room_type_from_objects(obj_names)
                         tsdf_planner.update_observation_history(snapshot, room_type)
+                    _lprof.tick("observation_history", chan="stage")
 
                     # (3) Update the Frontier Snapshots
                     update_success = tsdf_planner.update_frontier_map(
@@ -470,6 +504,11 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                         save_frontier_image=cfg.save_visualization,
                         eps_frontier_dir=eps_frontier_dir,
                         prompt_img_size=(cfg.prompt_h, cfg.prompt_w),
+                    )
+                    _lprof.tick(
+                        "update_frontier_map",
+                        chan="stage",
+                        n_frontiers=len(tsdf_planner.frontiers),
                     )
                     if not update_success:
                         logging.info("Warning! Update frontier map failed!")
@@ -507,6 +546,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                             cfg=cfg,
                             verbose=True,
                         )
+                        _lprof.tick("decision_query_total", chan="stage")
                         if vlm_response is None:
                             logging.info(
                                 f"Subtask id {subtask_id} invalid: query_vlm_for_response failed!"
@@ -523,6 +563,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                             cfg=cfg.planner,
                             pathfinder=scene.pathfinder,
                         )
+                        _lprof.tick("set_next_navigation_point", chan="stage")
                         if not update_success:
                             logging.info(
                                 f"Subtask id {subtask_id} invalid: set_next_navigation_point failed!"
@@ -561,6 +602,7 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                         path_points=None,
                         save_visualization=cfg.save_visualization,
                     )
+                    _lprof.tick("agent_step", chan="stage")
                     if return_values[0] is None:
                         logging.info(
                             f"Subtask id {subtask_id} invalid: agent_step failed!"
@@ -611,8 +653,10 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                                 f"[Phase II] Hypothesis graph stats: {tsdf_planner.get_hypothesis_graph_statistics()}"
                             )
 
+                    _lprof.tick("critic_and_misc", chan="stage")
                     # sanity check about objects, scene graph, snapshots, ...
                     scene.sanity_check(cfg=cfg)
+                    _lprof.tick("sanity_check", chan="stage")
 
                     if cfg.save_visualization:
                         # save the top-down visualization
