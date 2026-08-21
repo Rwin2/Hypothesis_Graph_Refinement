@@ -134,6 +134,8 @@ def get_step_info(step, verbose=False):
     snapshot_full_imgs = {}  # rgb_id -> full img
     snapshot_crops = {}  # rgb_id -> list of crops
     snapshot_clusters = {}  # rgb_id -> list of clusters
+    snapshot_crop_ids = {}  # rgb_id -> list of object ids (crop order)
+    snapshot_cluster_ids = {}  # rgb_id -> list of object ids (cluster)
     obj_map = step["obj_map"]
     seen_classes = set()
     for i, rgb_id in enumerate(step["snapshot_imgs"].keys()):
@@ -150,6 +152,13 @@ def get_step_info(step, verbose=False):
         cluster_class = [
             obj_map[int(obj_id)] for obj_id in step["snapshot_objects"][rgb_id]
         ]
+        snapshot_crop_ids[rgb_id] = [
+            int(crop_data["obj_id"])
+            for crop_data in step["snapshot_imgs"][rgb_id]["object_crop"]
+        ]
+        snapshot_cluster_ids[rgb_id] = [
+            int(obj_id) for obj_id in step["snapshot_objects"][rgb_id]
+        ]
         # remove duplicates
         seen_classes.update(sorted(list(set(snapshot_class))))
         snapshot_classes[rgb_id] = snapshot_class
@@ -163,16 +172,31 @@ def get_step_info(step, verbose=False):
     if step.get("use_prefiltering") is True:
         use_full_obj_list = step["use_full_obj_list"]
         n_prev_snapshot = len(snapshot_full_imgs)
-        snapshot_classes, keep_index, keep_index_snapshot = prefiltering(
-            question,
-            snapshot_classes,
-            snapshot_clusters,
-            seen_classes,
-            step["top_k_categories"],
-            image_goal,
-            use_full_obj_list,
-            verbose=verbose,
-        )
+        if step.get("prefilter_by_id") is True:
+            # Indexed prefiltering: list (id, label) pairs, answer = ids only.
+            # Same candidate source and top_k as the label variant; the id
+            # either exists or is dropped (no string-match fragility).
+            snapshot_classes, keep_index, keep_index_snapshot = prefiltering_by_id(
+                question,
+                snapshot_classes,
+                snapshot_crop_ids,
+                snapshot_cluster_ids,
+                obj_map,
+                step["top_k_categories"],
+                image_goal,
+                verbose=verbose,
+            )
+        else:
+            snapshot_classes, keep_index, keep_index_snapshot = prefiltering(
+                question,
+                snapshot_classes,
+                snapshot_clusters,
+                seen_classes,
+                step["top_k_categories"],
+                image_goal,
+                use_full_obj_list,
+                verbose=verbose,
+            )
         snapshot_full_imgs = {
             rgb_id: snapshot_full_imgs[rgb_id] for rgb_id in keep_index_snapshot.keys()
         }
@@ -386,8 +410,116 @@ def prefiltering(
     return snapshot_classes, keep_index, keep_index_snapshot
 
 
+def format_prefiltering_prompt_by_id(question, id_label_pairs, image_goal=None):
+    """Id-indexed variant of format_prefiltering_prompt: the object list is
+    'id. name' lines and the answer is ids only (short output by design)."""
+    content = []
+    sys_prompt = "You are an AI agent in a 3D indoor scene.\n"
+    prompt = "Your goal is to answer questions about the scene through exploration.\n"
+    prompt += "To efficiently solve the problem, you should first rank objects in the scene based on their importance.\n"
+    prompt += "These are the rules for the task.\n"
+    prompt += "1. Read through the whole object list.\n"
+    prompt += "2. Rank objects in the list based on how well they can help your exploration given the question.\n"
+    prompt += "3. Print ONLY the ids of the objects that may help your exploration given the question, one id per line, the most helpful first.\n"
+    prompt += "4. Print AT MOST 10 ids. If fewer than 10 objects are helpful, print only those; if none are helpful, print nothing. Do not pad the list.\n"
+    prompt += "5. Do not print any id not included in the list or include any additional information in your response.\n"
+    content.append((prompt,))
+    # ------------------format an example-------------------------
+    prompt = "Here is an example of selecting helpful objects:\n"
+    prompt += "Question: What can I use to watch my favorite shows and movies?\n"
+    prompt += "Following is a list of objects that you can choose, each object one line as 'id. name'\n"
+    prompt += "12. painting\n35. speaker\n7. box\n21. cabinet\n3. lamp\n54. tv\n9. book rack\n41. sofa\n6. oven\n18. bed\n27. curtain\n"
+    prompt += "Answer: 54\n35\n41\n18\n"
+    content.append((prompt,))
+    # ------------------Task to solve----------------------------
+    prompt = f"Following is the concrete content of the task and you should retrieve helpful objects in order:\n"
+    prompt += f"Question: {question}"
+    if image_goal is not None:
+        content.append((prompt, image_goal))
+        content.append(("\n",))
+    else:
+        content.append((prompt + "\n",))
+    prompt = "Following is a list of objects that you can choose, each object one line as 'id. name'\n"
+    for oid, label in id_label_pairs:
+        prompt += f"{oid}. {label}\n"
+    prompt += "Answer: "
+    content.append((prompt,))
+    return sys_prompt, content
+
+
+def get_prefiltering_ids(question, id_to_label, top_k=10, image_goal=None):
+    import re
+
+    pairs = sorted(id_to_label.items())
+    sys_prompt, content = format_prefiltering_prompt_by_id(
+        question, pairs, image_goal=image_goal
+    )
+    response = call_openai_api(sys_prompt, content)
+    if response is None:
+        return []
+    # parse: one id per line; validate against the real id set, keep order
+    selected = []
+    for line in response.strip().split("\n"):
+        m = re.match(r"\s*(\d+)", line.strip())
+        if m:
+            oid = int(m.group(1))
+            if oid in id_to_label and oid not in selected:
+                selected.append(oid)
+    return selected[:top_k]
+
+
+def prefiltering_by_id(
+    question,
+    snapshot_classes,
+    snapshot_crop_ids,
+    snapshot_cluster_ids,
+    obj_map,
+    top_k=10,
+    image_goal=None,
+    verbose=False,
+):
+    """Id-indexed prefiltering. Candidate list = objects appearing in snapshot
+    crops (same source as the label variant); snapshot/crop keep rules mirror
+    prefiltering() but compare object ids instead of label strings."""
+    id_to_label = {}
+    for rgb_id, ids in snapshot_crop_ids.items():
+        for oid in ids:
+            if int(oid) in obj_map or oid in obj_map:
+                id_to_label[int(oid)] = obj_map[int(oid)]
+    selected_ids = set(
+        get_prefiltering_ids(question, id_to_label, top_k, image_goal)
+    )
+    if verbose:
+        logging.info(
+            f"Prefiltering by id selected: "
+            f"{[(i, id_to_label.get(i)) for i in sorted(selected_ids)]}"
+        )
+
+    keep_index = [
+        i
+        for i, k in enumerate(snapshot_cluster_ids.keys())
+        if len(set(snapshot_cluster_ids[k]) & selected_ids) > 0
+    ]
+    keep_snapshot_id = [list(snapshot_classes.keys())[i] for i in keep_index]
+    snapshot_classes = {rgb_id: snapshot_classes[rgb_id] for rgb_id in keep_snapshot_id}
+
+    keep_index_snapshot = {}
+    for rgb_id in keep_snapshot_id:
+        keep_index_snapshot[rgb_id] = [
+            i
+            for i in range(len(snapshot_classes[rgb_id]))
+            if snapshot_crop_ids[rgb_id][i] in selected_ids
+        ]
+        snapshot_classes[rgb_id] = [
+            snapshot_classes[rgb_id][i] for i in keep_index_snapshot[rgb_id]
+        ]
+
+    return snapshot_classes, keep_index, keep_index_snapshot
+
+
 def explore_step(step, cfg, verbose=False):
     step["use_prefiltering"] = cfg.prefiltering
+    step["prefilter_by_id"] = bool(cfg.get("prefilter_by_id", False))
     step["top_k_categories"] = cfg.top_k_categories
     (
         question,

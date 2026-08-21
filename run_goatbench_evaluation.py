@@ -728,6 +728,46 @@ def main(cfg, start_ratio=0.0, end_ratio=1.0, split=1):
                         f"Fail: agent failed to reach the target viewpoint at distance {agent_subtask_distance}!"
                     )
 
+                # Structured per-subtask summary for offline diagnosis
+                # (no-op unless HGR_LATENCY_PROFILE=1)
+                try:
+                    _claim = None
+                    if type(max_point_choice) == SnapShot:
+                        _claim = [
+                            {
+                                "obj_id": int(oid),
+                                "class_name": scene.objects[oid]["class_name"]
+                                if oid in scene.objects
+                                else None,
+                            }
+                            for oid in max_point_choice.cluster
+                        ]
+                    _lprof.record(
+                        "subtask_summary",
+                        0,
+                        subtask_id=subtask_id,
+                        question=subtask_metadata["question"],
+                        task_type=subtask_metadata["task_type"],
+                        goal_class=subtask_metadata["class"],
+                        success_by_distance=bool(success_by_distance),
+                        success_by_snapshot=bool(success_by_snapshot),
+                        dist_to_viewpoint=float(agent_subtask_distance),
+                        n_steps=int(cnt_step + 1),
+                        path_length=float(logger.subtask_explore_dist),
+                        gt_explore_dist=float(
+                            subtask_metadata["gt_subtask_explore_dist"]
+                        ),
+                        claimed_by_snapshot=bool(task_success),
+                        claimed_objects=_claim,
+                        goal_obj_ids_mapping={
+                            int(k): [int(x) for x in v]
+                            for k, v in goal_obj_ids_mapping.items()
+                        },
+                        final_pts=[float(x) for x in np.asarray(pts).ravel()],
+                    )
+                except Exception as _sum_exc:
+                    logging.info(f"[PROFILE] subtask summary skipped: {_sum_exc}")
+
                 logger.log_subtask_result(
                     success_by_snapshot=success_by_snapshot,
                     success_by_distance=success_by_distance,

@@ -13,6 +13,7 @@ choose_every_step: true  # whether to query vlm at each step, or only after arri
 egocentric_views: true  # whether to add egocentric views when prompting vlm
 prefiltering: true  # whether to use prefiltering (you in fact cannot turn this off, since otherwise it will exceed the context length limit)
 top_k_categories: 10  # keep the top k relevant categories during prefiltering
+prefilter_by_id: true  # idx10: id-indexed prefiltering (answer = ids, at most top_k)
 
 # about detection model
 yolo_model_name: yolov8x-world.pt

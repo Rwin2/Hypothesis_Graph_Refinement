@@ -2,6 +2,8 @@ import os.path
 import logging
 
 import numpy as np
+
+from src import latency_profiler as _lprof
 import matplotlib.pyplot as plt
 from skimage import measure
 from sklearn.cluster import DBSCAN, KMeans
@@ -676,6 +678,12 @@ class TSDFPlanner(TSDFPlannerBase):
                 logging.info(
                     f"pathfinder cannot find a path from {cur_point[:2]} to {self.target_point}, just go to a point between them"
                 )
+                _lprof.record(
+                    "nav_no_path",
+                    0,
+                    cur_point=[int(x) for x in cur_point[:2]],
+                    target_point=[int(x) for x in self.target_point],
+                )
                 walk_dir = self.target_point - cur_point[:2]
                 walk_dir = walk_dir / np.linalg.norm(walk_dir)
                 next_point = (
@@ -731,6 +739,13 @@ class TSDFPlanner(TSDFPlannerBase):
             # usually this is a problem in the pathfinder
             logging.warning(
                 f"Warning in agent_step: next point is the same as the current point when determining the direction"
+            )
+            _lprof.record(
+                "nav_stuck",
+                0,
+                cur_point=[int(x) for x in cur_point[:2]],
+                target_point=[int(x) for x in np.asarray(self.target_point).ravel()[:2]],
+                target_arrived=bool(target_arrived),
             )
             direction = self.rad2vector(angle)
         direction = direction / np.linalg.norm(direction)
@@ -1345,6 +1360,22 @@ class TSDFPlanner(TSDFPlannerBase):
                 ) * self._voxel_size
                 score = relevance * float(np.exp(-lambda_d * dist)) + lambda_h * entropy_n
                 scores.append((i, float(score)))
+                # Diagnostics: score decomposition per frontier (no-op when
+                # profiling is off) — for the :8002 embedder-discrimination
+                # question in HANDOFF_V2.
+                _top = sd.get_top_k(1) if sd is not None else ([], [])
+                _lprof.record(
+                    "frontier_score",
+                    0,
+                    frontier_idx=i,
+                    score=float(score),
+                    relevance=float(relevance),
+                    dist_m=float(dist),
+                    entropy_n=float(entropy_n),
+                    top_room=(_top[0][0] if _top[0] else None),
+                    goal_text=relevance_text,
+                    has_goal_image=bool(goal_image),
+                )
             scores.sort(key=lambda x: x[1], reverse=True)
             return scores
 
